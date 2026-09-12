@@ -9,25 +9,25 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
     <group
-        android:scaleX="3.5"
-        android:scaleY="3.5"
-        android:translateX="12"
-        android:translateY="12">
+        android:scaleX="2.6"
+        android:scaleY="2.6"
+        android:translateX="22.8"
+        android:translateY="22.8">
         <path
             android:pathData="M13,21h8"
-            android:strokeColor="#000000"
+            android:strokeColor="#FFFFFF"
             android:strokeLineCap="round"
             android:strokeLineJoin="round"
             android:strokeWidth="2" />
         <path
             android:pathData="m15,5l4,4"
-            android:strokeColor="#000000"
+            android:strokeColor="#FFFFFF"
             android:strokeLineCap="round"
             android:strokeLineJoin="round"
             android:strokeWidth="2" />
         <path
             android:pathData="M21.174,6.812a1,1 0,0 0,-3.986,-3.987L3.842,16.174a2,2 0,0 0,-0.5,0.83l-1.321,4.352a0.5,0.5 0,0 0,0.623,0.622l4.353,-1.32a2,2 0,0 0,0.83,-0.497Z"
-            android:strokeColor="#000000"
+            android:strokeColor="#FFFFFF"
             android:strokeLineCap="round"
             android:strokeLineJoin="round"
             android:strokeWidth="2" />
