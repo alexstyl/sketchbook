@@ -1,5 +1,6 @@
 package dev.alexstyl.sketchbook
 
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -554,6 +555,13 @@ class MainActivity : AppCompatActivity() {
         @Volatile private var viewportOffsetY = 0f
         @Volatile private var viewportScale = 1f
         private val strokes = mutableListOf<Stroke>()
+        private var documentBitmap: Bitmap? = null
+        private var documentCanvas: Canvas? = null
+        private var documentVersion = 0
+        private var renderedDocumentVersion = -1
+        private var renderedOffsetX = Float.NaN
+        private var renderedOffsetY = Float.NaN
+        private var renderedScale = Float.NaN
         private var panning = false
         private var trackingFingerGesture = false
         private var gestureStartDistance = 0f
@@ -591,7 +599,7 @@ class MainActivity : AppCompatActivity() {
         fun commit(samples: List<Sample>) {
             if (samples.isEmpty()) return
             strokes += Stroke(samples, isEraser = false)
-            invalidate()
+            invalidateDocument()
             onDocumentChanged()
         }
 
@@ -604,13 +612,13 @@ class MainActivity : AppCompatActivity() {
                 isEraser = true,
                 eraserWidth = ERASER_WIDTH_PX / viewportScale,
             )
-            invalidate()
+            invalidateDocument()
             onDocumentChanged()
         }
 
         fun clear() {
             strokes.clear()
-            invalidate()
+            invalidateDocument()
             onDocumentChanged()
         }
 
@@ -620,7 +628,7 @@ class MainActivity : AppCompatActivity() {
             viewportScale = document.viewportScale.coerceIn(MIN_ZOOM, MAX_ZOOM)
             strokes.clear()
             strokes += document.strokes
-            invalidate()
+            invalidateDocument()
         }
 
         fun snapshot(): SketchDocument = SketchDocument(
@@ -634,13 +642,47 @@ class MainActivity : AppCompatActivity() {
             return handleFingerPan(event)
         }
 
+        override fun onSizeChanged(width: Int, height: Int, oldWidth: Int, oldHeight: Int) {
+            super.onSizeChanged(width, height, oldWidth, oldHeight)
+            documentBitmap?.recycle()
+            documentBitmap = if (width > 0 && height > 0) {
+                Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            } else {
+                null
+            }
+            documentCanvas = documentBitmap?.let(::Canvas)
+            renderedDocumentVersion = -1
+        }
+
         override fun onDraw(canvas: Canvas) {
-            canvas.drawColor(Color.WHITE)
-            canvas.save()
-            canvas.translate(viewportOffsetX, viewportOffsetY)
-            canvas.scale(viewportScale, viewportScale)
-            strokes.forEach { drawStroke(canvas, it) }
-            canvas.restore()
+            rebuildDocumentBitmapIfNeeded()
+            documentBitmap?.let { canvas.drawBitmap(it, 0f, 0f, null) } ?: canvas.drawColor(Color.WHITE)
+        }
+
+        private fun invalidateDocument() {
+            documentVersion += 1
+            invalidate()
+        }
+
+        private fun rebuildDocumentBitmapIfNeeded() {
+            val target = documentBitmap ?: return
+            val targetCanvas = documentCanvas ?: return
+            if (
+                renderedDocumentVersion == documentVersion &&
+                renderedOffsetX == viewportOffsetX &&
+                renderedOffsetY == viewportOffsetY &&
+                renderedScale == viewportScale
+            ) return
+            targetCanvas.drawColor(Color.WHITE)
+            targetCanvas.save()
+            targetCanvas.translate(viewportOffsetX, viewportOffsetY)
+            targetCanvas.scale(viewportScale, viewportScale)
+            strokes.forEach { drawStroke(targetCanvas, it) }
+            targetCanvas.restore()
+            renderedDocumentVersion = documentVersion
+            renderedOffsetX = viewportOffsetX
+            renderedOffsetY = viewportOffsetY
+            renderedScale = viewportScale
         }
 
         private fun handleFingerPan(event: android.view.MotionEvent): Boolean {
