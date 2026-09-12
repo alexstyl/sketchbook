@@ -1,6 +1,7 @@
 package dev.alexstyl.sketchbook
 
 import android.graphics.Canvas
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
@@ -9,6 +10,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.SurfaceHolder
+import android.view.PointerIcon
 import android.view.SurfaceView
 import android.view.View
 import android.widget.FrameLayout
@@ -152,8 +154,10 @@ class MainActivity : AppCompatActivity() {
         hideSystemBars()
         initializeBooxSdk()
 
-        inputSurface = SurfaceView(this)
+        val hoverPointerIcon = createHoverPointerIcon()
+        inputSurface = SurfaceView(this).apply { pointerIcon = hoverPointerIcon }
         sketchView = SketchView(this, ::scheduleDocumentSave).apply {
+            pointerIcon = hoverPointerIcon
             SketchStore.read(documentFile)?.let(::restore)
         }
         toolRail = ComposeView(this).apply {
@@ -274,6 +278,15 @@ class MainActivity : AppCompatActivity() {
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             hide(WindowInsetsCompat.Type.systemBars())
         }
+    }
+
+    private fun createHoverPointerIcon(): PointerIcon {
+        val size = 8
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        Canvas(bitmap).drawCircle(size / 2f, size / 2f, 2.5f, Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.BLACK
+        })
+        return PointerIcon.create(bitmap, size / 2f, size / 2f)
     }
 
     private fun configureRawDrawing() {
