@@ -1,10 +1,8 @@
 package dev.alexstyl.sketchbook
 
-import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.PorterDuff
 import android.graphics.Rect
 import android.app.AlertDialog
 import android.os.Bundle
@@ -15,8 +13,11 @@ import android.view.SurfaceView
 import android.view.View
 import android.widget.FrameLayout
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -25,9 +26,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color as ComposeColor
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.graphics.ColorFilter
@@ -55,7 +61,7 @@ import org.lsposed.hiddenapibypass.HiddenApiBypass
 /**
  * A deliberately small BOOX raw-ink sample.
  *
- * The SurfaceView is only the firmware's live-ink target. SketchView is the canonical bitmap that
+ * The SurfaceView is only the firmware's live-ink target. SketchView is the canonical document that
  * owns committed strokes. Keeping those two layers separate is the important part: firmware ink is
  * instant but transient; Android's canvas is persistent and always safe to redraw.
  */
@@ -295,7 +301,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun addPoint(point: TouchPoint) {
-        pendingStroke += Sample(point.getX(), point.getY())
+        pendingStroke += sketchView.documentPoint(point.getX(), point.getY())
     }
 
     private fun selectTool(tool: Tool) {
@@ -380,11 +386,24 @@ class MainActivity : AppCompatActivity() {
         onClick: () -> Unit,
     ) {
         val shape = RoundedCornerShape(14.dp)
+        val interactionSource = remember { MutableInteractionSource() }
+        val pressed by interactionSource.collectIsPressedAsState()
+        val scale by animateFloatAsState(
+            targetValue = if (pressed) 0.9f else 1f,
+            animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
+            label = "tool button scale",
+        )
         UnstyledButton(
             onClick = onClick,
             contentPadding = PaddingValues(14.dp),
+            interactionSource = interactionSource,
+            indication = LocalIndication.current,
             modifier = Modifier
                 .size(64.dp)
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                }
                 .clip(shape)
                 .background(if (selected) ComposeColor.Black else ComposeColor.White)
                 .border(1.dp, ComposeColor.Black, shape),
@@ -409,8 +428,14 @@ class MainActivity : AppCompatActivity() {
 
     private class SketchView(context: android.content.Context) : View(context) {
         var eraserEnabled = false
-        private var bitmap: Bitmap? = null
-        private var bitmapCanvas: Canvas? = null
+        @Volatile private var viewportOffsetX = 0f
+        @Volatile private var viewportOffsetY = 0f
+        private val strokes = mutableListOf<Stroke>()
+        private var activeEraserStroke: MutableList<Sample>? = null
+        private var panning = false
+        private var trackingFingerGesture = false
+        private var lastPanX = 0f
+        private var lastPanY = 0f
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.BLACK
             strokeWidth = STROKE_WIDTH_PX
@@ -419,63 +444,53 @@ class MainActivity : AppCompatActivity() {
             style = Paint.Style.STROKE
         }
         private val eraserPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
             strokeWidth = ERASER_WIDTH_PX
             strokeCap = Paint.Cap.ROUND
             strokeJoin = Paint.Join.ROUND
             style = Paint.Style.STROKE
-            xfermode = android.graphics.PorterDuffXfermode(PorterDuff.Mode.CLEAR)
         }
-        private var previousX = 0f
-        private var previousY = 0f
 
-        override fun onSizeChanged(width: Int, height: Int, oldWidth: Int, oldHeight: Int) {
-            if (width <= 0 || height <= 0) return
-            val replacement = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            bitmap?.let { old -> Canvas(replacement).drawBitmap(old, 0f, 0f, null); old.recycle() }
-            bitmap = replacement
-            bitmapCanvas = Canvas(replacement)
-        }
+        fun documentPoint(screenX: Float, screenY: Float): Sample =
+            Sample(screenX - viewportOffsetX, screenY - viewportOffsetY)
 
         fun commit(samples: List<Sample>) {
-            val canvas = bitmapCanvas ?: return
-            when (samples.size) {
-                0 -> return
-                1 -> canvas.drawPoint(samples.first().x, samples.first().y, paint)
-                else -> samples.zipWithNext().forEach { (from, to) ->
-                    canvas.drawLine(from.x, from.y, to.x, to.y, paint)
-                }
-            }
+            if (samples.isEmpty()) return
+            strokes += Stroke(samples, isEraser = false)
             invalidate()
         }
 
         fun clear() {
-            bitmapCanvas?.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
+            strokes.clear()
+            activeEraserStroke = null
             invalidate()
         }
 
         override fun onTouchEvent(event: android.view.MotionEvent): Boolean {
-            val toolType = event.getToolType(0)
-            val isStylus = toolType == android.view.MotionEvent.TOOL_TYPE_STYLUS ||
-                toolType == android.view.MotionEvent.TOOL_TYPE_ERASER
+            if (handleFingerPan(event)) return true
+
+            val isStylus = event.getToolType(0).let {
+                it == android.view.MotionEvent.TOOL_TYPE_STYLUS ||
+                    it == android.view.MotionEvent.TOOL_TYPE_ERASER
+            }
             if (!eraserEnabled || !isStylus) return false
-            val canvas = bitmapCanvas ?: return false
             when (event.actionMasked) {
                 android.view.MotionEvent.ACTION_DOWN -> {
-                    previousX = event.x
-                    previousY = event.y
-                    canvas.drawPoint(previousX, previousY, eraserPaint)
+                    activeEraserStroke = mutableListOf(documentPoint(event.x, event.y))
                     invalidate()
                     return true
                 }
                 android.view.MotionEvent.ACTION_MOVE -> {
-                    canvas.drawLine(previousX, previousY, event.x, event.y, eraserPaint)
-                    previousX = event.x
-                    previousY = event.y
+                    activeEraserStroke?.add(documentPoint(event.x, event.y))
                     invalidate()
                     return true
                 }
                 android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
-                    canvas.drawLine(previousX, previousY, event.x, event.y, eraserPaint)
+                    activeEraserStroke?.apply {
+                        add(documentPoint(event.x, event.y))
+                        strokes += Stroke(toList(), isEraser = true)
+                    }
+                    activeEraserStroke = null
                     invalidate()
                     return true
                 }
@@ -485,8 +500,78 @@ class MainActivity : AppCompatActivity() {
 
         override fun onDraw(canvas: Canvas) {
             canvas.drawColor(Color.WHITE)
-            bitmap?.let { canvas.drawBitmap(it, 0f, 0f, null) }
+            canvas.save()
+            canvas.translate(viewportOffsetX, viewportOffsetY)
+            strokes.forEach { drawStroke(canvas, it) }
+            activeEraserStroke?.let { drawStroke(canvas, Stroke(it, isEraser = true)) }
+            canvas.restore()
         }
+
+        private fun handleFingerPan(event: android.view.MotionEvent): Boolean {
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    trackingFingerGesture = event.getToolType(0) == android.view.MotionEvent.TOOL_TYPE_FINGER
+                    return trackingFingerGesture
+                }
+                android.view.MotionEvent.ACTION_POINTER_DOWN -> {
+                    if (event.pointerCount == 2 && bothPointersAreFingers(event)) {
+                        panning = true
+                        trackingFingerGesture = true
+                        activeEraserStroke = null
+                        setPanAnchor(event)
+                    }
+                    return trackingFingerGesture
+                }
+                android.view.MotionEvent.ACTION_MOVE -> {
+                    if (panning && event.pointerCount >= 2) {
+                        val panX = (event.getX(0) + event.getX(1)) / 2f
+                        val panY = (event.getY(0) + event.getY(1)) / 2f
+                        viewportOffsetX += panX - lastPanX
+                        viewportOffsetY += panY - lastPanY
+                        lastPanX = panX
+                        lastPanY = panY
+                        invalidate()
+                    }
+                    return trackingFingerGesture
+                }
+                android.view.MotionEvent.ACTION_POINTER_UP -> {
+                    if (panning && event.pointerCount <= 2) panning = false
+                    return trackingFingerGesture
+                }
+                android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
+                    val handled = trackingFingerGesture
+                    panning = false
+                    trackingFingerGesture = false
+                    return handled
+                }
+            }
+            return trackingFingerGesture
+        }
+
+        private fun bothPointersAreFingers(event: android.view.MotionEvent): Boolean =
+            event.getToolType(0) == android.view.MotionEvent.TOOL_TYPE_FINGER &&
+                event.getToolType(1) == android.view.MotionEvent.TOOL_TYPE_FINGER
+
+        private fun setPanAnchor(event: android.view.MotionEvent) {
+            lastPanX = (event.getX(0) + event.getX(1)) / 2f
+            lastPanY = (event.getY(0) + event.getY(1)) / 2f
+        }
+
+        private fun drawStroke(canvas: Canvas, stroke: Stroke) {
+            val strokePaint = if (stroke.isEraser) eraserPaint else paint
+            when (stroke.samples.size) {
+                0 -> Unit
+                1 -> {
+                    val sample = stroke.samples.first()
+                    canvas.drawPoint(sample.x, sample.y, strokePaint)
+                }
+                else -> stroke.samples.zipWithNext().forEach { (from, to) ->
+                    canvas.drawLine(from.x, from.y, to.x, to.y, strokePaint)
+                }
+            }
+        }
+
+        private data class Stroke(val samples: List<Sample>, val isEraser: Boolean)
     }
 
     private companion object {
