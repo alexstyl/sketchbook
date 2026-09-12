@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.PorterDuff
 import android.graphics.Rect
+import android.app.AlertDialog
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -13,25 +14,34 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
 import android.widget.FrameLayout
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color as ComposeColor
 import androidx.compose.ui.platform.ComposeView
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.foundation.text.BasicText
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.doOnLayout
+import androidx.compose.ui.graphics.vector.rememberVectorPainter
+import dev.alexstyl.sketchbook.iconography.Icons
+import dev.alexstyl.sketchbook.iconography.Eraser
+import dev.alexstyl.sketchbook.iconography.PenLine
+import dev.alexstyl.sketchbook.iconography.Trash2
 import com.composeunstyled.UnstyledButton
 import com.onyx.android.sdk.api.device.epd.EpdController
 import com.onyx.android.sdk.api.device.epd.UpdateMode
@@ -53,7 +63,8 @@ class MainActivity : AppCompatActivity() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var inputSurface: SurfaceView
     private lateinit var sketchView: SketchView
-    private lateinit var toolBar: ComposeView
+    private lateinit var toolRail: ComposeView
+    private lateinit var clearButton: ComposeView
 
     private var helper: TouchHelper? = null
     private var systemInsets = WindowInsetsCompat.CONSUMED
@@ -119,15 +130,19 @@ class MainActivity : AppCompatActivity() {
 
         inputSurface = SurfaceView(this)
         sketchView = SketchView(this)
-        toolBar = ComposeView(this).apply {
+        toolRail = ComposeView(this).apply {
             setContent {
-                InkToolbar(
+                ToolRail(
                     activeTool = activeTool,
                     onToolSelected = ::selectTool,
-                    onClear = ::clearSketch,
                 )
             }
         }
+        clearButton = ComposeView(this).apply {
+            setContent { ClearButton(onClear = ::confirmClearSketch) }
+        }
+        toolRail.doOnLayout { inputSurface.post(::configureRawDrawing) }
+        clearButton.doOnLayout { inputSurface.post(::configureRawDrawing) }
         val root = FrameLayout(this).apply {
             setBackgroundColor(Color.WHITE)
             addView(
@@ -145,7 +160,17 @@ class MainActivity : AppCompatActivity() {
                 ),
             )
             addView(
-                toolBar,
+                toolRail,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    android.view.Gravity.CENTER_VERTICAL or android.view.Gravity.END,
+                ).apply {
+                    marginEnd = dp(16)
+                },
+            )
+            addView(
+                clearButton,
                 FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.WRAP_CONTENT,
                     FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -252,10 +277,17 @@ class MainActivity : AppCompatActivity() {
             if (bars.bottom > 0) add(Rect(0, height - bars.bottom, width, height))
             if (bars.left > 0) add(Rect(0, 0, bars.left, height))
             if (bars.right > 0) add(Rect(width - bars.right, 0, width, height))
-            toolBar.takeIf { it.isLaidOut }?.let { bar ->
+            listOf(toolRail, clearButton).filter { it.isLaidOut }.forEach { control ->
                 val location = IntArray(2)
-                bar.getLocationInWindow(location)
-                add(Rect(location[0], location[1], location[0] + bar.width, location[1] + bar.height))
+                control.getLocationInWindow(location)
+                add(
+                    Rect(
+                        location[0],
+                        location[1],
+                        location[0] + control.width,
+                        location[1] + control.height,
+                    ),
+                )
             }
             // BOOX ignores an empty exclusion list and can retain stale rectangles from a prior session.
             if (isEmpty()) add(Rect(0, 0, 1, 1))
@@ -284,6 +316,15 @@ class MainActivity : AppCompatActivity() {
         inputSurface.post(::configureRawDrawing)
     }
 
+    private fun confirmClearSketch() {
+        AlertDialog.Builder(this)
+            .setTitle("Clear sketch?")
+            .setMessage("This removes all marks from the current sketch.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Clear") { _, _ -> clearSketch() }
+            .show()
+    }
+
     private fun applyFirmwareState(currentHelper: TouchHelper) {
         if (activeTool == Tool.Pen && resumed) {
             currentHelper.setRawDrawingRenderEnabled(true)
@@ -301,40 +342,60 @@ class MainActivity : AppCompatActivity() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     @Composable
-    private fun InkToolbar(
+    private fun ToolRail(
         activeTool: Tool,
         onToolSelected: (Tool) -> Unit,
-        onClear: () -> Unit,
     ) {
         Column(
-            Modifier
-                .width(92.dp)
-                .border(1.dp, ComposeColor.Black)
-                .background(ComposeColor.White),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            ToolButton("PEN", activeTool == Tool.Pen) { onToolSelected(Tool.Pen) }
-            ToolButton("ERASE", activeTool == Tool.Eraser) { onToolSelected(Tool.Eraser) }
-            ToolButton("CLEAR", selected = false, onClick = onClear)
+            ToolIconButton(
+                icon = Icons.PenLine,
+                contentDescription = "Pen",
+                selected = activeTool == Tool.Pen,
+            ) { onToolSelected(Tool.Pen) }
+            ToolIconButton(
+                icon = Icons.Eraser,
+                contentDescription = "Eraser",
+                selected = activeTool == Tool.Eraser,
+            ) { onToolSelected(Tool.Eraser) }
         }
     }
 
     @Composable
-    private fun ToolButton(label: String, selected: Boolean, onClick: () -> Unit) {
+    private fun ClearButton(onClear: () -> Unit) {
+        ToolIconButton(
+            icon = Icons.Trash2,
+            contentDescription = "Clear sketch",
+            selected = false,
+            onClick = onClear,
+        )
+    }
+
+    @Composable
+    private fun ToolIconButton(
+        icon: ImageVector,
+        contentDescription: String,
+        selected: Boolean,
+        onClick: () -> Unit,
+    ) {
+        val shape = RoundedCornerShape(14.dp)
         UnstyledButton(
             onClick = onClick,
-            contentPadding = PaddingValues(vertical = 14.dp),
+            contentPadding = PaddingValues(14.dp),
             modifier = Modifier
-                .fillMaxWidth()
-                .border(1.dp, ComposeColor.Black)
-                .background(
-                    if (selected) ComposeColor.Black else ComposeColor.White,
-                ),
+                .size(64.dp)
+                .clip(shape)
+                .background(if (selected) ComposeColor.Black else ComposeColor.White)
+                .border(1.dp, ComposeColor.Black, shape),
         ) {
-            BasicText(
-                text = label,
-                style = TextStyle(
-                    color = if (selected) ComposeColor.White else ComposeColor.Black,
+            Image(
+                painter = rememberVectorPainter(icon),
+                contentDescription = contentDescription,
+                colorFilter = ColorFilter.tint(
+                    if (selected) ComposeColor.White else ComposeColor.Black,
                 ),
+                modifier = Modifier.size(32.dp),
             )
         }
     }
