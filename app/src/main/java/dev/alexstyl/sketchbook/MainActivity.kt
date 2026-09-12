@@ -827,7 +827,9 @@ class MainActivity : AppCompatActivity() {
     private companion object {
         const val STROKE_WIDTH_PX = 5f
         const val MIN_STROKE_WIDTH_PX = 2f
-        const val STROKE_WIDTH_RANGE_PX = 6f
+        // The firmware preview is configured at 5px. Keep the committed pressure curve within
+        // that same 2–5px envelope so lifting the pen cannot make a line visually expand.
+        const val STROKE_WIDTH_RANGE_PX = 3f
         const val ERASER_WIDTH_PX = 42f
         const val SOFT_ERASER_OPACITY = 0.5f
         const val SOFT_ERASER_BLACK_OPACITY = 0.1f
