@@ -304,7 +304,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun addPoint(point: TouchPoint) {
-        pendingStroke += Sample(
+        pendingStroke += sketchView.documentPoint(
             point.getX(), point.getY(),
             (point.getPressure() / maxTouchPressure).coerceIn(0f, 1f),
         )
@@ -410,6 +410,15 @@ class MainActivity : AppCompatActivity() {
     private class SketchView(context: android.content.Context) : View(context) {
         private var bitmap: Bitmap? = null
         private var bitmapCanvas: Canvas? = null
+        private val strokes = mutableListOf<Stroke>()
+        private var viewportOffsetX = 0f
+        private var viewportOffsetY = 0f
+        private var cachedOffsetX = Float.NaN
+        private var cachedOffsetY = Float.NaN
+        private var trackingFingerGesture = false
+        private var panning = false
+        private var lastPanFocusX = 0f
+        private var lastPanFocusY = 0f
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.BLACK
             strokeWidth = MAX_STROKE_WIDTH_PX
@@ -428,50 +437,130 @@ class MainActivity : AppCompatActivity() {
         override fun onSizeChanged(width: Int, height: Int, oldWidth: Int, oldHeight: Int) {
             if (width <= 0 || height <= 0) return
             val replacement = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            bitmap?.let { old -> Canvas(replacement).drawBitmap(old, 0f, 0f, null); old.recycle() }
+            bitmap?.recycle()
             bitmap = replacement
             bitmapCanvas = Canvas(replacement)
+            cachedOffsetX = Float.NaN
+            cachedOffsetY = Float.NaN
         }
 
+        fun documentPoint(screenX: Float, screenY: Float, pressure: Float): Sample =
+            Sample(screenX - viewportOffsetX, screenY - viewportOffsetY, pressure)
+
         fun commit(samples: List<Sample>) {
-            val canvas = bitmapCanvas ?: return
-            when (samples.size) {
-                0 -> return
-                1 -> {
-                    val sample = samples.first()
-                    paint.strokeWidth = pressureWidth(sample.pressure)
-                    canvas.drawPoint(sample.x, sample.y, paint)
-                }
-                else -> samples.zipWithNext().forEach { (from, to) ->
-                    paint.strokeWidth = pressureWidth((from.pressure + to.pressure) / 2f)
-                    canvas.drawLine(from.x, from.y, to.x, to.y, paint)
-                }
-            }
-            invalidate()
+            appendStroke(Stroke(samples, isEraser = false))
         }
 
         fun erase(samples: List<Sample>) {
-            val canvas = bitmapCanvas ?: return
-            when (samples.size) {
-                0 -> return
-                1 -> canvas.drawPoint(samples.first().x, samples.first().y, eraserPaint)
-                else -> samples.zipWithNext().forEach { (from, to) ->
-                    canvas.drawLine(from.x, from.y, to.x, to.y, eraserPaint)
-                }
+            appendStroke(Stroke(samples, isEraser = true))
+        }
+
+        private fun appendStroke(stroke: Stroke) {
+            if (stroke.samples.isEmpty()) return
+            // Reconcile a moved viewport before adding the new stroke. That keeps the finished
+            // stroke on the direct bitmap path exactly once, rather than replaying it at pen-up.
+            rebuildDocumentBitmapIfNeeded()
+            strokes += stroke
+            bitmapCanvas?.let { canvas ->
+                canvas.save()
+                canvas.translate(viewportOffsetX, viewportOffsetY)
+                drawStroke(canvas, stroke)
+                canvas.restore()
             }
             invalidate()
         }
 
         fun clear() {
+            strokes.clear()
             bitmapCanvas?.drawColor(Color.WHITE)
+            cachedOffsetX = viewportOffsetX
+            cachedOffsetY = viewportOffsetY
             invalidate()
         }
 
+        override fun onTouchEvent(event: android.view.MotionEvent): Boolean {
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    trackingFingerGesture = event.getToolType(0) == android.view.MotionEvent.TOOL_TYPE_FINGER
+                    return trackingFingerGesture
+                }
+                android.view.MotionEvent.ACTION_POINTER_DOWN -> {
+                    if (event.pointerCount == 2 && bothPointersAreFingers(event)) {
+                        panning = true
+                        trackingFingerGesture = true
+                        lastPanFocusX = (event.getX(0) + event.getX(1)) / 2f
+                        lastPanFocusY = (event.getY(0) + event.getY(1)) / 2f
+                    }
+                    return trackingFingerGesture
+                }
+                android.view.MotionEvent.ACTION_MOVE -> {
+                    if (panning && event.pointerCount >= 2) {
+                        val focusX = (event.getX(0) + event.getX(1)) / 2f
+                        val focusY = (event.getY(0) + event.getY(1)) / 2f
+                        viewportOffsetX += focusX - lastPanFocusX
+                        viewportOffsetY += focusY - lastPanFocusY
+                        lastPanFocusX = focusX
+                        lastPanFocusY = focusY
+                        invalidate()
+                    }
+                    return trackingFingerGesture
+                }
+                android.view.MotionEvent.ACTION_POINTER_UP -> {
+                    if (event.pointerCount == 2) panning = false
+                    return trackingFingerGesture
+                }
+                android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
+                    val handled = trackingFingerGesture
+                    panning = false
+                    trackingFingerGesture = false
+                    return handled
+                }
+            }
+            return trackingFingerGesture
+        }
+
         override fun onDraw(canvas: Canvas) {
+            rebuildDocumentBitmapIfNeeded()
             canvas.drawColor(Color.WHITE)
             bitmap?.let { canvas.drawBitmap(it, 0f, 0f, null) }
         }
+
+        private fun rebuildDocumentBitmapIfNeeded() {
+            val canvas = bitmapCanvas ?: return
+            if (cachedOffsetX == viewportOffsetX && cachedOffsetY == viewportOffsetY) return
+            canvas.drawColor(Color.WHITE)
+            canvas.save()
+            canvas.translate(viewportOffsetX, viewportOffsetY)
+            strokes.forEach { drawStroke(canvas, it) }
+            canvas.restore()
+            cachedOffsetX = viewportOffsetX
+            cachedOffsetY = viewportOffsetY
+        }
+
+        private fun drawStroke(canvas: Canvas, stroke: Stroke) {
+            val strokePaint = if (stroke.isEraser) eraserPaint else paint
+            when (stroke.samples.size) {
+                0 -> Unit
+                1 -> {
+                    val sample = stroke.samples.first()
+                    if (!stroke.isEraser) strokePaint.strokeWidth = pressureWidth(sample.pressure)
+                    canvas.drawPoint(sample.x, sample.y, strokePaint)
+                }
+                else -> stroke.samples.zipWithNext().forEach { (from, to) ->
+                    if (!stroke.isEraser) {
+                        strokePaint.strokeWidth = pressureWidth((from.pressure + to.pressure) / 2f)
+                    }
+                    canvas.drawLine(from.x, from.y, to.x, to.y, strokePaint)
+                }
+            }
+        }
+
+        private fun bothPointersAreFingers(event: android.view.MotionEvent): Boolean =
+            event.getToolType(0) == android.view.MotionEvent.TOOL_TYPE_FINGER &&
+                event.getToolType(1) == android.view.MotionEvent.TOOL_TYPE_FINGER
     }
+
+    private data class Stroke(val samples: List<Sample>, val isEraser: Boolean)
 
     private companion object {
         const val MIN_STROKE_WIDTH_PX = 2f
