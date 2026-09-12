@@ -498,6 +498,8 @@ class MainActivity : AppCompatActivity() {
         @Volatile private var viewportScale = 1f
         private val strokes = mutableListOf<Stroke>()
         private var activeEraserStroke: MutableList<Sample>? = null
+        private var eraserCursorX: Float? = null
+        private var eraserCursorY: Float? = null
         private var panning = false
         private var trackingFingerGesture = false
         private var gestureStartDistance = 0f
@@ -525,6 +527,11 @@ class MainActivity : AppCompatActivity() {
             strokeJoin = Paint.Join.ROUND
             style = Paint.Style.STROKE
         }
+        private val eraserCursorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.BLACK
+            strokeWidth = 2f
+            style = Paint.Style.STROKE
+        }
         fun documentPoint(screenX: Float, screenY: Float, pressure: Float = DEFAULT_PRESSURE): Sample =
             Sample(
                 (screenX - viewportOffsetX) / viewportScale,
@@ -542,6 +549,7 @@ class MainActivity : AppCompatActivity() {
         fun clear() {
             strokes.clear()
             activeEraserStroke = null
+            hideEraserCursor()
             invalidate()
             onDocumentChanged()
         }
@@ -575,11 +583,13 @@ class MainActivity : AppCompatActivity() {
             when (event.actionMasked) {
                 android.view.MotionEvent.ACTION_DOWN -> {
                     activeEraserStroke = mutableListOf(documentPoint(event.x, event.y))
+                    showEraserCursor(event.x, event.y)
                     invalidate()
                     return true
                 }
                 android.view.MotionEvent.ACTION_MOVE -> {
                     activeEraserStroke?.add(documentPoint(event.x, event.y))
+                    showEraserCursor(event.x, event.y)
                     invalidate()
                     return true
                 }
@@ -589,6 +599,7 @@ class MainActivity : AppCompatActivity() {
                         strokes += Stroke(toList(), isEraser = true)
                     }
                     activeEraserStroke = null
+                    hideEraserCursor()
                     invalidate()
                     onDocumentChanged()
                     return true
@@ -605,6 +616,24 @@ class MainActivity : AppCompatActivity() {
             strokes.forEach { drawStroke(canvas, it) }
             activeEraserStroke?.let { drawStroke(canvas, Stroke(it, isEraser = true)) }
             canvas.restore()
+            eraserCursorX?.let { x ->
+                canvas.drawCircle(
+                    x,
+                    requireNotNull(eraserCursorY),
+                    ERASER_WIDTH_PX * viewportScale / 2f,
+                    eraserCursorPaint,
+                )
+            }
+        }
+
+        private fun showEraserCursor(screenX: Float, screenY: Float) {
+            eraserCursorX = screenX
+            eraserCursorY = screenY
+        }
+
+        private fun hideEraserCursor() {
+            eraserCursorX = null
+            eraserCursorY = null
         }
 
         private fun handleFingerPan(event: android.view.MotionEvent): Boolean {
