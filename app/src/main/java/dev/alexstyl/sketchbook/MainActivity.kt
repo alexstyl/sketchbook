@@ -1,7 +1,6 @@
 package dev.alexstyl.sketchbook
 
 import android.graphics.Canvas
-import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
@@ -10,7 +9,6 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.SurfaceHolder
-import android.view.PointerIcon
 import android.view.SurfaceView
 import android.view.View
 import android.widget.FrameLayout
@@ -98,6 +96,21 @@ class MainActivity : AppCompatActivity() {
         val document = sketchView.snapshot()
         persistenceExecutor.execute { SketchStore.write(documentFile, document) }
     }
+    private var hoverX = Float.NaN
+    private var hoverY = Float.NaN
+    private var hoverSettleX = Float.NaN
+    private var hoverSettleY = Float.NaN
+    private var shownHoverX = Float.NaN
+    private var shownHoverY = Float.NaN
+    private var hoverMarkerVisible = false
+    private val showSettledHoverMarker = Runnable {
+        if (!strokeInProgress && activeTool == Tool.Pen && hoverX.isFinite() && hoverY.isFinite()) {
+            sketchView.showHoverMarker(hoverX, hoverY)
+            shownHoverX = hoverX
+            shownHoverY = hoverY
+            hoverMarkerVisible = true
+        }
+    }
     private val unfreeze = Runnable {
         if (strokeInProgress) return@Runnable
         val currentHelper = helper ?: return@Runnable
@@ -118,6 +131,7 @@ class MainActivity : AppCompatActivity() {
         override fun onBeginRawDrawing(isEraser: Boolean, point: TouchPoint?) {
             strokeInProgress = true
             mainHandler.removeCallbacks(unfreeze)
+            mainHandler.post(::hideHoverMarker)
             pendingStroke.clear()
             point?.let(::addPoint)
         }
@@ -146,6 +160,13 @@ class MainActivity : AppCompatActivity() {
         override fun onRawErasingTouchPointMoveReceived(point: TouchPoint?) = Unit
         override fun onRawErasingTouchPointListReceived(points: TouchPointList?) = Unit
         override fun onEndRawErasing(isEraser: Boolean, point: TouchPoint?) = Unit
+
+        override fun onPenActive(point: TouchPoint?) {
+            point ?: return
+            val x = point.getX()
+            val y = point.getY()
+            mainHandler.post { scheduleSettledHoverMarker(x, y) }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -154,10 +175,8 @@ class MainActivity : AppCompatActivity() {
         hideSystemBars()
         initializeBooxSdk()
 
-        val hoverPointerIcon = createHoverPointerIcon()
-        inputSurface = SurfaceView(this).apply { pointerIcon = hoverPointerIcon }
+        inputSurface = SurfaceView(this)
         sketchView = SketchView(this, ::scheduleDocumentSave).apply {
-            pointerIcon = hoverPointerIcon
             SketchStore.read(documentFile)?.let(::restore)
         }
         toolRail = ComposeView(this).apply {
@@ -251,6 +270,7 @@ class MainActivity : AppCompatActivity() {
         resumed = false
         persistDocumentNow()
         mainHandler.removeCallbacks(unfreeze)
+        hideHoverMarker()
         disableRawDrawing()
         super.onPause()
     }
@@ -278,15 +298,6 @@ class MainActivity : AppCompatActivity() {
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             hide(WindowInsetsCompat.Type.systemBars())
         }
-    }
-
-    private fun createHoverPointerIcon(): PointerIcon {
-        val size = 8
-        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        Canvas(bitmap).drawCircle(size / 2f, size / 2f, 2.5f, Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.BLACK
-        })
-        return PointerIcon.create(bitmap, size / 2f, size / 2f)
     }
 
     private fun configureRawDrawing() {
@@ -356,6 +367,7 @@ class MainActivity : AppCompatActivity() {
         if (activeTool == tool) return
         activeTool = tool
         mainHandler.removeCallbacks(unfreeze)
+        if (tool != Tool.Pen) hideHoverMarker()
         sketchView.eraserEnabled = tool == Tool.Eraser
         helper?.let(::applyFirmwareState)
         // A raw drawing session latches exclusion rectangles. Reconfigure after a UI/tool change,
@@ -373,6 +385,34 @@ class MainActivity : AppCompatActivity() {
     private fun scheduleDocumentSave() {
         mainHandler.removeCallbacks(saveDocument)
         mainHandler.postDelayed(saveDocument, SAVE_DEBOUNCE_MS)
+    }
+
+    private fun scheduleSettledHoverMarker(x: Float, y: Float) {
+        if (strokeInProgress || activeTool != Tool.Pen) return
+        val moved = !hoverSettleX.isFinite() ||
+            kotlin.math.hypot(x - hoverSettleX, y - hoverSettleY) > HOVER_MOVE_SLOP_PX
+        hoverX = x
+        hoverY = y
+        if (!moved) return
+
+        hoverSettleX = x
+        hoverSettleY = y
+        if (hoverMarkerVisible && kotlin.math.hypot(x - shownHoverX, y - shownHoverY) > HOVER_MOVE_SLOP_PX) {
+            sketchView.hideHoverMarker()
+            hoverMarkerVisible = false
+        }
+        mainHandler.removeCallbacks(showSettledHoverMarker)
+        mainHandler.postDelayed(showSettledHoverMarker, HOVER_SETTLE_MS)
+    }
+
+    private fun hideHoverMarker() {
+        mainHandler.removeCallbacks(showSettledHoverMarker)
+        hoverX = Float.NaN
+        hoverY = Float.NaN
+        hoverSettleX = Float.NaN
+        hoverSettleY = Float.NaN
+        if (hoverMarkerVisible) sketchView.hideHoverMarker()
+        hoverMarkerVisible = false
     }
 
     private fun persistDocumentNow() {
@@ -538,6 +578,12 @@ class MainActivity : AppCompatActivity() {
             strokeJoin = Paint.Join.ROUND
             style = Paint.Style.STROKE
         }
+        private val hoverMarkerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.BLACK
+            style = Paint.Style.FILL
+        }
+        private var hoverMarkerX: Float? = null
+        private var hoverMarkerY: Float? = null
         fun documentPoint(screenX: Float, screenY: Float, pressure: Float = DEFAULT_PRESSURE): Sample =
             Sample(
                 (screenX - viewportOffsetX) / viewportScale,
@@ -557,6 +603,19 @@ class MainActivity : AppCompatActivity() {
             activeEraserStroke = null
             invalidate()
             onDocumentChanged()
+        }
+
+        fun showHoverMarker(screenX: Float, screenY: Float) {
+            hoverMarkerX = screenX
+            hoverMarkerY = screenY
+            invalidate()
+        }
+
+        fun hideHoverMarker() {
+            if (hoverMarkerX == null) return
+            hoverMarkerX = null
+            hoverMarkerY = null
+            invalidate()
         }
 
         fun restore(document: SketchDocument) {
@@ -618,6 +677,9 @@ class MainActivity : AppCompatActivity() {
             strokes.forEach { drawStroke(canvas, it) }
             activeEraserStroke?.let { drawStroke(canvas, Stroke(it, isEraser = true)) }
             canvas.restore()
+            hoverMarkerX?.let { x ->
+                canvas.drawCircle(x, requireNotNull(hoverMarkerY), HOVER_MARKER_RADIUS_PX, hoverMarkerPaint)
+            }
         }
 
         private fun handleFingerPan(event: android.view.MotionEvent): Boolean {
@@ -830,5 +892,8 @@ class MainActivity : AppCompatActivity() {
         const val MIN_ZOOM = 0.25f
         const val MAX_ZOOM = 4f
         const val DEFAULT_PRESSURE = 0.5f
+        const val HOVER_MARKER_RADIUS_PX = 3f
+        const val HOVER_MOVE_SLOP_PX = 12f
+        const val HOVER_SETTLE_MS = 160L
     }
 }
