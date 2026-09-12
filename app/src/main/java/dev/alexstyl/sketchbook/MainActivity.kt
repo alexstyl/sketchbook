@@ -59,6 +59,14 @@ import com.onyx.android.sdk.pen.TouchHelper
 import com.onyx.android.sdk.pen.data.TouchPointList
 import com.onyx.android.sdk.rx.RxManager
 import org.lsposed.hiddenapibypass.HiddenApiBypass
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
+import java.io.DataInputStream
+import java.io.DataOutputStream
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.util.concurrent.Executors
 
 /**
  * A deliberately small BOOX raw-ink sample.
@@ -69,6 +77,7 @@ import org.lsposed.hiddenapibypass.HiddenApiBypass
  */
 class MainActivity : AppCompatActivity() {
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val persistenceExecutor = Executors.newSingleThreadExecutor()
     private lateinit var inputSurface: SurfaceView
     private lateinit var sketchView: SketchView
     private lateinit var toolRail: ComposeView
@@ -81,6 +90,12 @@ class MainActivity : AppCompatActivity() {
     private var strokeInProgress = false
     private var activeTool by mutableStateOf<Tool>(Tool.Pen)
     private val pendingStroke = ArrayList<Sample>(512)
+    private val documentFile by lazy { File(filesDir, DOCUMENT_FILE_NAME) }
+    private val saveDocument = Runnable {
+        if (!::sketchView.isInitialized) return@Runnable
+        val document = sketchView.snapshot()
+        persistenceExecutor.execute { SketchStore.write(documentFile, document) }
+    }
 
     private val unfreeze = Runnable {
         if (strokeInProgress) return@Runnable
@@ -139,7 +154,9 @@ class MainActivity : AppCompatActivity() {
         initializeBooxSdk()
 
         inputSurface = SurfaceView(this)
-        sketchView = SketchView(this)
+        sketchView = SketchView(this, ::scheduleDocumentSave).apply {
+            SketchStore.read(documentFile)?.let(::restore)
+        }
         toolRail = ComposeView(this).apply {
             setContent {
                 ToolRail(
@@ -229,18 +246,21 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         resumed = false
+        persistDocumentNow()
         mainHandler.removeCallbacks(unfreeze)
         disableRawDrawing()
         super.onPause()
     }
 
     override fun onDestroy() {
+        persistDocumentNow()
         mainHandler.removeCallbacksAndMessages(null)
         runCatching {
             helper?.setRawDrawingEnabled(false)
             helper?.closeRawDrawing()
         }
         helper = null
+        persistenceExecutor.shutdown()
         super.onDestroy()
     }
 
@@ -335,6 +355,20 @@ class MainActivity : AppCompatActivity() {
         helper?.let(::disableFirmware)
         sketchView.clear()
         inputSurface.post(::configureRawDrawing)
+    }
+
+    private fun scheduleDocumentSave() {
+        mainHandler.removeCallbacks(saveDocument)
+        mainHandler.postDelayed(saveDocument, SAVE_DEBOUNCE_MS)
+    }
+
+    private fun persistDocumentNow() {
+        if (!::sketchView.isInitialized) return
+        mainHandler.removeCallbacks(saveDocument)
+        val document = sketchView.snapshot()
+        runCatching {
+            persistenceExecutor.submit { SketchStore.write(documentFile, document) }.get()
+        }
     }
 
     private fun confirmNewSketch() {
@@ -436,12 +470,23 @@ class MainActivity : AppCompatActivity() {
 
     private data class Sample(val x: Float, val y: Float)
 
+    private data class Stroke(val samples: List<Sample>, val isEraser: Boolean)
+
+    private data class SketchDocument(
+        val viewportOffsetX: Float,
+        val viewportOffsetY: Float,
+        val strokes: List<Stroke>,
+    )
+
     private sealed interface Tool {
         data object Pen : Tool
         data object Eraser : Tool
     }
 
-    private class SketchView(context: android.content.Context) : View(context) {
+    private class SketchView(
+        context: android.content.Context,
+        private val onDocumentChanged: () -> Unit,
+    ) : View(context) {
         var eraserEnabled = false
         @Volatile private var viewportOffsetX = 0f
         @Volatile private var viewportOffsetY = 0f
@@ -473,13 +518,31 @@ class MainActivity : AppCompatActivity() {
             if (samples.isEmpty()) return
             strokes += Stroke(samples, isEraser = false)
             invalidate()
+            onDocumentChanged()
         }
 
         fun clear() {
             strokes.clear()
             activeEraserStroke = null
             invalidate()
+            onDocumentChanged()
         }
+
+        fun restore(document: SketchDocument) {
+            viewportOffsetX = document.viewportOffsetX
+            viewportOffsetY = document.viewportOffsetY
+            strokes.clear()
+            strokes += document.strokes
+            invalidate()
+        }
+
+        fun snapshot(): SketchDocument = SketchDocument(
+            viewportOffsetX = viewportOffsetX,
+            viewportOffsetY = viewportOffsetY,
+            strokes = strokes + listOfNotNull(
+                activeEraserStroke?.let { Stroke(it.toList(), isEraser = true) },
+            ),
+        )
 
         override fun onTouchEvent(event: android.view.MotionEvent): Boolean {
             if (handleFingerPan(event)) return true
@@ -507,6 +570,7 @@ class MainActivity : AppCompatActivity() {
                     }
                     activeEraserStroke = null
                     invalidate()
+                    onDocumentChanged()
                     return true
                 }
             }
@@ -546,6 +610,7 @@ class MainActivity : AppCompatActivity() {
                         lastPanX = panX
                         lastPanY = panY
                         invalidate()
+                        onDocumentChanged()
                     }
                     return trackingFingerGesture
                 }
@@ -585,8 +650,56 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
 
-        private data class Stroke(val samples: List<Sample>, val isEraser: Boolean)
+    private object SketchStore {
+        private const val MAGIC = 0x534B4554 // SKET
+        private const val VERSION = 1
+        private const val MAX_STROKES = 100_000
+        private const val MAX_SAMPLES_PER_STROKE = 100_000
+
+        fun read(file: File): SketchDocument? = runCatching {
+            DataInputStream(BufferedInputStream(FileInputStream(file))).use { input ->
+                check(input.readInt() == MAGIC)
+                check(input.readInt() == VERSION)
+                val offsetX = input.readFloat()
+                val offsetY = input.readFloat()
+                val strokeCount = input.readInt()
+                check(strokeCount in 0..MAX_STROKES)
+                val strokes = ArrayList<Stroke>(strokeCount)
+                repeat(strokeCount) {
+                    val isEraser = input.readBoolean()
+                    val sampleCount = input.readInt()
+                    check(sampleCount in 0..MAX_SAMPLES_PER_STROKE)
+                    val samples = ArrayList<Sample>(sampleCount)
+                    repeat(sampleCount) {
+                        samples += Sample(input.readFloat(), input.readFloat())
+                    }
+                    strokes += Stroke(samples, isEraser)
+                }
+                SketchDocument(offsetX, offsetY, strokes)
+            }
+        }.getOrNull()
+
+        fun write(file: File, document: SketchDocument) {
+            val temporary = File(file.parentFile, "${file.name}.tmp")
+            DataOutputStream(BufferedOutputStream(FileOutputStream(temporary))).use { output ->
+                output.writeInt(MAGIC)
+                output.writeInt(VERSION)
+                output.writeFloat(document.viewportOffsetX)
+                output.writeFloat(document.viewportOffsetY)
+                output.writeInt(document.strokes.size)
+                document.strokes.forEach { stroke ->
+                    output.writeBoolean(stroke.isEraser)
+                    output.writeInt(stroke.samples.size)
+                    stroke.samples.forEach { sample ->
+                        output.writeFloat(sample.x)
+                        output.writeFloat(sample.y)
+                    }
+                }
+            }
+            check(temporary.renameTo(file)) { "Could not replace ${file.name}" }
+        }
     }
 
     private companion object {
@@ -594,5 +707,7 @@ class MainActivity : AppCompatActivity() {
         const val ERASER_WIDTH_PX = 42f
         const val UNFREEZE_IDLE_MS = 700L
         const val PANEL_SETTLE_MS = 300L
+        const val SAVE_DEBOUNCE_MS = 250L
+        const val DOCUMENT_FILE_NAME = "sketchbook-document.bin"
     }
 }
