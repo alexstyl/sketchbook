@@ -13,14 +13,12 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
 import android.widget.FrameLayout
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.width
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -28,10 +26,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color as ComposeColor
 import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.foundation.text.BasicText
 import androidx.compose.ui.unit.dp
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import com.composeunstyled.UnstyledButton
 import com.onyx.android.sdk.api.device.epd.EpdController
 import com.onyx.android.sdk.api.device.epd.UpdateMode
 import com.onyx.android.sdk.data.note.TouchPoint
@@ -305,26 +306,37 @@ class MainActivity : AppCompatActivity() {
         onToolSelected: (Tool) -> Unit,
         onClear: () -> Unit,
     ) {
-        Surface(shadowElevation = 4.dp) {
-            Column(Modifier.width(92.dp)) {
-                ToolButton("PEN", activeTool == Tool.Pen) { onToolSelected(Tool.Pen) }
-                ToolButton("ERASE", activeTool == Tool.Eraser) { onToolSelected(Tool.Eraser) }
-                ToolButton("CLEAR", selected = false, onClick = onClear)
-            }
+        Column(
+            Modifier
+                .width(92.dp)
+                .border(1.dp, ComposeColor.Black)
+                .background(ComposeColor.White),
+        ) {
+            ToolButton("PEN", activeTool == Tool.Pen) { onToolSelected(Tool.Pen) }
+            ToolButton("ERASE", activeTool == Tool.Eraser) { onToolSelected(Tool.Eraser) }
+            ToolButton("CLEAR", selected = false, onClick = onClear)
         }
     }
 
     @Composable
     private fun ToolButton(label: String, selected: Boolean, onClick: () -> Unit) {
-        Button(
+        UnstyledButton(
             onClick = onClick,
-            modifier = Modifier.fillMaxWidth(),
             contentPadding = PaddingValues(vertical = 14.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = if (selected) ComposeColor.Black else ComposeColor.White,
-                contentColor = if (selected) ComposeColor.White else ComposeColor.Black,
-            ),
-        ) { Text(label) }
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, ComposeColor.Black)
+                .background(
+                    if (selected) ComposeColor.Black else ComposeColor.White,
+                ),
+        ) {
+            BasicText(
+                text = label,
+                style = TextStyle(
+                    color = if (selected) ComposeColor.White else ComposeColor.Black,
+                ),
+            )
+        }
     }
 
     private data class Sample(val x: Float, val y: Float)

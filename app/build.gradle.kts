@@ -40,8 +40,9 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     val composeBom = platform("androidx.compose:compose-bom:2024.10.01")
     implementation(composeBom)
+    implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.material3:material3")
+    implementation("com.composables:composeunstyled:2.4.0")
     implementation("com.onyx.android.sdk:onyxsdk-pen:1.5.4") {
         exclude(group = "com.onyx.android.sdk", module = "onyxsdk-geometry")
     }
