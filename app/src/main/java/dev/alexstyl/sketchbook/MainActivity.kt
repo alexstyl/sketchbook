@@ -96,10 +96,6 @@ class MainActivity : AppCompatActivity() {
         val document = sketchView.snapshot()
         persistenceExecutor.execute { SketchStore.write(documentFile, document) }
     }
-    private val hideHoverCursor = Runnable {
-        if (::sketchView.isInitialized) sketchView.hideHoverCursor()
-    }
-
     private val unfreeze = Runnable {
         if (strokeInProgress) return@Runnable
         val currentHelper = helper ?: return@Runnable
@@ -120,8 +116,6 @@ class MainActivity : AppCompatActivity() {
         override fun onBeginRawDrawing(isEraser: Boolean, point: TouchPoint?) {
             strokeInProgress = true
             mainHandler.removeCallbacks(unfreeze)
-            mainHandler.removeCallbacks(hideHoverCursor)
-            sketchView.post { sketchView.hideHoverCursor() }
             pendingStroke.clear()
             point?.let(::addPoint)
         }
@@ -150,19 +144,6 @@ class MainActivity : AppCompatActivity() {
         override fun onRawErasingTouchPointMoveReceived(point: TouchPoint?) = Unit
         override fun onRawErasingTouchPointListReceived(points: TouchPointList?) = Unit
         override fun onEndRawErasing(isEraser: Boolean, point: TouchPoint?) = Unit
-
-        override fun onPenActive(point: TouchPoint?) {
-            point ?: return
-            val x = point.getX()
-            val y = point.getY()
-            sketchView.post {
-                if (!strokeInProgress && activeTool == Tool.Pen) {
-                    sketchView.showHoverCursor(x, y)
-                    mainHandler.removeCallbacks(hideHoverCursor)
-                    mainHandler.postDelayed(hideHoverCursor, HOVER_CURSOR_TIMEOUT_MS)
-                }
-            }
-        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -266,8 +247,6 @@ class MainActivity : AppCompatActivity() {
         resumed = false
         persistDocumentNow()
         mainHandler.removeCallbacks(unfreeze)
-        mainHandler.removeCallbacks(hideHoverCursor)
-        sketchView.hideHoverCursor()
         disableRawDrawing()
         super.onPause()
     }
@@ -364,10 +343,6 @@ class MainActivity : AppCompatActivity() {
         if (activeTool == tool) return
         activeTool = tool
         mainHandler.removeCallbacks(unfreeze)
-        if (tool != Tool.Pen) {
-            mainHandler.removeCallbacks(hideHoverCursor)
-            sketchView.hideHoverCursor()
-        }
         sketchView.eraserEnabled = tool == Tool.Eraser
         helper?.let(::applyFirmwareState)
         // A raw drawing session latches exclusion rectangles. Reconfigure after a UI/tool change,
@@ -535,8 +510,6 @@ class MainActivity : AppCompatActivity() {
         private var lastTwoFingerTapAt = 0L
         private var lastTwoFingerTapX = 0f
         private var lastTwoFingerTapY = 0f
-        private var hoverCursorX: Float? = null
-        private var hoverCursorY: Float? = null
         private val touchSlop = android.view.ViewConfiguration.get(context).scaledTouchSlop
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.BLACK
@@ -552,11 +525,6 @@ class MainActivity : AppCompatActivity() {
             strokeJoin = Paint.Join.ROUND
             style = Paint.Style.STROKE
         }
-        private val hoverCursorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.BLACK
-            style = Paint.Style.FILL
-        }
-
         fun documentPoint(screenX: Float, screenY: Float, pressure: Float = DEFAULT_PRESSURE): Sample =
             Sample(
                 (screenX - viewportOffsetX) / viewportScale,
@@ -576,19 +544,6 @@ class MainActivity : AppCompatActivity() {
             activeEraserStroke = null
             invalidate()
             onDocumentChanged()
-        }
-
-        fun showHoverCursor(screenX: Float, screenY: Float) {
-            hoverCursorX = screenX
-            hoverCursorY = screenY
-            invalidate()
-        }
-
-        fun hideHoverCursor() {
-            if (hoverCursorX == null) return
-            hoverCursorX = null
-            hoverCursorY = null
-            invalidate()
         }
 
         fun restore(document: SketchDocument) {
@@ -650,9 +605,6 @@ class MainActivity : AppCompatActivity() {
             strokes.forEach { drawStroke(canvas, it) }
             activeEraserStroke?.let { drawStroke(canvas, Stroke(it, isEraser = true)) }
             canvas.restore()
-            hoverCursorX?.let { x ->
-                canvas.drawCircle(x, requireNotNull(hoverCursorY), HOVER_CURSOR_RADIUS_PX, hoverCursorPaint)
-            }
         }
 
         private fun handleFingerPan(event: android.view.MotionEvent): Boolean {
@@ -865,7 +817,5 @@ class MainActivity : AppCompatActivity() {
         const val MIN_ZOOM = 0.25f
         const val MAX_ZOOM = 4f
         const val DEFAULT_PRESSURE = 0.5f
-        const val HOVER_CURSOR_RADIUS_PX = 3f
-        const val HOVER_CURSOR_TIMEOUT_MS = 120L
     }
 }
