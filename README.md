@@ -32,4 +32,4 @@ the sketch safe to pan, zoom, erase, and restore after an app restart.
 
 ## License
 
-Apache-2.0. BOOX's SDK remains subject to BOOX's own terms.
+MIT. BOOX's SDK remains subject to BOOX's own terms.
