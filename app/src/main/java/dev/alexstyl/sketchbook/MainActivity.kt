@@ -498,8 +498,15 @@ class MainActivity : AppCompatActivity() {
         private var trackingFingerGesture = false
         private var gestureStartDistance = 0f
         private var gestureStartScale = 1f
+        private var gestureStartFocusX = 0f
+        private var gestureStartFocusY = 0f
         private var gestureFocusDocumentX = 0f
         private var gestureFocusDocumentY = 0f
+        private var twoFingerTapCandidate = false
+        private var lastTwoFingerTapAt = 0L
+        private var lastTwoFingerTapX = 0f
+        private var lastTwoFingerTapY = 0f
+        private val touchSlop = android.view.ViewConfiguration.get(context).scaledTouchSlop
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.BLACK
             strokeWidth = STROKE_WIDTH_PX
@@ -608,6 +615,9 @@ class MainActivity : AppCompatActivity() {
                         trackingFingerGesture = true
                         activeEraserStroke = null
                         setGestureAnchor(event)
+                        twoFingerTapCandidate = true
+                    } else {
+                        twoFingerTapCandidate = false
                     }
                     return trackingFingerGesture
                 }
@@ -615,6 +625,9 @@ class MainActivity : AppCompatActivity() {
                     if (panning && event.pointerCount >= 2) {
                         val focusX = (event.getX(0) + event.getX(1)) / 2f
                         val focusY = (event.getY(0) + event.getY(1)) / 2f
+                        if (twoFingerTapCandidate && gestureMoved(event, focusX, focusY)) {
+                            twoFingerTapCandidate = false
+                        }
                         val scaleChange = pointerDistance(event) / gestureStartDistance
                         viewportScale = (gestureStartScale * scaleChange).coerceIn(MIN_ZOOM, MAX_ZOOM)
                         viewportOffsetX = focusX - gestureFocusDocumentX * viewportScale
@@ -625,13 +638,18 @@ class MainActivity : AppCompatActivity() {
                     return trackingFingerGesture
                 }
                 android.view.MotionEvent.ACTION_POINTER_UP -> {
-                    if (panning && event.pointerCount <= 2) panning = false
+                    if (panning && event.pointerCount == 2) {
+                        if (twoFingerTapCandidate) registerTwoFingerTap(event)
+                        twoFingerTapCandidate = false
+                        panning = false
+                    }
                     return trackingFingerGesture
                 }
                 android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
                     val handled = trackingFingerGesture
                     panning = false
                     trackingFingerGesture = false
+                    twoFingerTapCandidate = false
                     return handled
                 }
             }
@@ -645,10 +663,47 @@ class MainActivity : AppCompatActivity() {
         private fun setGestureAnchor(event: android.view.MotionEvent) {
             val focusX = (event.getX(0) + event.getX(1)) / 2f
             val focusY = (event.getY(0) + event.getY(1)) / 2f
+            gestureStartFocusX = focusX
+            gestureStartFocusY = focusY
             gestureStartDistance = pointerDistance(event).coerceAtLeast(1f)
             gestureStartScale = viewportScale
             gestureFocusDocumentX = (focusX - viewportOffsetX) / viewportScale
             gestureFocusDocumentY = (focusY - viewportOffsetY) / viewportScale
+        }
+
+        private fun gestureMoved(event: android.view.MotionEvent, focusX: Float, focusY: Float): Boolean {
+            val focusDistance = kotlin.math.hypot(
+                focusX - gestureStartFocusX,
+                focusY - gestureStartFocusY,
+            )
+            return focusDistance > touchSlop ||
+                kotlin.math.abs(pointerDistance(event) - gestureStartDistance) > touchSlop
+        }
+
+        private fun registerTwoFingerTap(event: android.view.MotionEvent) {
+            val focusX = (event.getX(0) + event.getX(1)) / 2f
+            val focusY = (event.getY(0) + event.getY(1)) / 2f
+            val isDoubleTap = event.eventTime - lastTwoFingerTapAt <=
+                android.view.ViewConfiguration.getDoubleTapTimeout() &&
+                kotlin.math.hypot(focusX - lastTwoFingerTapX, focusY - lastTwoFingerTapY) <= touchSlop * 2
+            if (isDoubleTap) {
+                resetZoomAt(focusX, focusY)
+                lastTwoFingerTapAt = 0L
+            } else {
+                lastTwoFingerTapAt = event.eventTime
+                lastTwoFingerTapX = focusX
+                lastTwoFingerTapY = focusY
+            }
+        }
+
+        private fun resetZoomAt(focusX: Float, focusY: Float) {
+            val documentX = (focusX - viewportOffsetX) / viewportScale
+            val documentY = (focusY - viewportOffsetY) / viewportScale
+            viewportScale = 1f
+            viewportOffsetX = focusX - documentX
+            viewportOffsetY = focusY - documentY
+            invalidate()
+            onDocumentChanged()
         }
 
         private fun pointerDistance(event: android.view.MotionEvent): Float {
