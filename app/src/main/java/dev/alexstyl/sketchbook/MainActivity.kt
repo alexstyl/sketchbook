@@ -290,6 +290,7 @@ class MainActivity : AppCompatActivity() {
             currentHelper.setStrokeColor(Color.BLACK)
             currentHelper.setLimitRect(mutableListOf(limit)).setExcludeRect(excludes)
             currentHelper.openRawDrawing()
+            currentHelper.setStrokeStyle(TouchHelper.STROKE_STYLE_FOUNTAIN)
             // Critical: leave finger input to Android. Only the stylus belongs to the BOOX pipeline.
             currentHelper.enableFingerTouch(false)
             currentHelper.setRawDrawingRenderEnabled(true)
@@ -336,7 +337,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun addPoint(point: TouchPoint) {
-        pendingStroke += sketchView.documentPoint(point.getX(), point.getY())
+        pendingStroke += sketchView.documentPoint(point.getX(), point.getY(), point.getPressure())
     }
 
     private fun selectTool(tool: Tool) {
@@ -468,7 +469,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private data class Sample(val x: Float, val y: Float)
+    private data class Sample(
+        val x: Float,
+        val y: Float,
+        val pressure: Float = DEFAULT_PRESSURE,
+    )
 
     private data class Stroke(val samples: List<Sample>, val isEraser: Boolean)
 
@@ -522,10 +527,11 @@ class MainActivity : AppCompatActivity() {
             style = Paint.Style.STROKE
         }
 
-        fun documentPoint(screenX: Float, screenY: Float): Sample =
+        fun documentPoint(screenX: Float, screenY: Float, pressure: Float = DEFAULT_PRESSURE): Sample =
             Sample(
                 (screenX - viewportOffsetX) / viewportScale,
                 (screenY - viewportOffsetY) / viewportScale,
+                normalizePressure(pressure),
             )
 
         fun commit(samples: List<Sample>) {
@@ -713,23 +719,40 @@ class MainActivity : AppCompatActivity() {
         }
 
         private fun drawStroke(canvas: Canvas, stroke: Stroke) {
-            val strokePaint = if (stroke.isEraser) eraserPaint else paint
             when (stroke.samples.size) {
                 0 -> Unit
                 1 -> {
                     val sample = stroke.samples.first()
-                    canvas.drawPoint(sample.x, sample.y, strokePaint)
+                    canvas.drawPoint(sample.x, sample.y, paintFor(stroke, sample.pressure))
                 }
                 else -> stroke.samples.zipWithNext().forEach { (from, to) ->
-                    canvas.drawLine(from.x, from.y, to.x, to.y, strokePaint)
+                    canvas.drawLine(
+                        from.x,
+                        from.y,
+                        to.x,
+                        to.y,
+                        paintFor(stroke, (from.pressure + to.pressure) / 2f),
+                    )
                 }
             }
+        }
+
+        private fun paintFor(stroke: Stroke, pressure: Float): Paint =
+            if (stroke.isEraser) {
+                eraserPaint
+            } else {
+                paint.apply { strokeWidth = MIN_STROKE_WIDTH_PX + pressure * STROKE_WIDTH_RANGE_PX }
+            }
+
+        private fun normalizePressure(pressure: Float): Float {
+            val normalized = if (pressure > 1f) pressure / EpdController.MAX_TOUCH_PRESSURE else pressure
+            return normalized.coerceIn(0f, 1f)
         }
     }
 
     private object SketchStore {
         private const val MAGIC = 0x534B4554 // SKET
-        private const val VERSION = 2
+        private const val VERSION = 3
         private const val MAX_STROKES = 100_000
         private const val MAX_SAMPLES_PER_STROKE = 100_000
 
@@ -750,7 +773,10 @@ class MainActivity : AppCompatActivity() {
                     check(sampleCount in 0..MAX_SAMPLES_PER_STROKE)
                     val samples = ArrayList<Sample>(sampleCount)
                     repeat(sampleCount) {
-                        samples += Sample(input.readFloat(), input.readFloat())
+                        val x = input.readFloat()
+                        val y = input.readFloat()
+                        val pressure = if (version >= 3) input.readFloat() else DEFAULT_PRESSURE
+                        samples += Sample(x, y, pressure)
                     }
                     strokes += Stroke(samples, isEraser)
                 }
@@ -773,6 +799,7 @@ class MainActivity : AppCompatActivity() {
                     stroke.samples.forEach { sample ->
                         output.writeFloat(sample.x)
                         output.writeFloat(sample.y)
+                        output.writeFloat(sample.pressure)
                     }
                 }
             }
@@ -782,6 +809,8 @@ class MainActivity : AppCompatActivity() {
 
     private companion object {
         const val STROKE_WIDTH_PX = 5f
+        const val MIN_STROKE_WIDTH_PX = 2f
+        const val STROKE_WIDTH_RANGE_PX = 6f
         const val ERASER_WIDTH_PX = 42f
         const val UNFREEZE_IDLE_MS = 700L
         const val PANEL_SETTLE_MS = 300L
@@ -789,5 +818,6 @@ class MainActivity : AppCompatActivity() {
         const val DOCUMENT_FILE_NAME = "sketchbook-document.bin"
         const val MIN_ZOOM = 0.25f
         const val MAX_ZOOM = 4f
+        const val DEFAULT_PRESSURE = 0.5f
     }
 }
