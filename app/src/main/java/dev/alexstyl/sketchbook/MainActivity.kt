@@ -53,7 +53,6 @@ import dev.alexstyl.sketchbook.iconography.FilePlus
 import com.composeunstyled.UnstyledButton
 import com.onyx.android.sdk.api.device.epd.EpdController
 import com.onyx.android.sdk.api.device.epd.UpdateMode
-import com.onyx.android.sdk.device.Device
 import com.onyx.android.sdk.data.note.TouchPoint
 import com.onyx.android.sdk.pen.RawInputCallback
 import com.onyx.android.sdk.pen.TouchHelper
@@ -307,23 +306,15 @@ class MainActivity : AppCompatActivity() {
             currentHelper.setRawDrawingEnabled(false)
             currentHelper.closeRawDrawing()
             val isEraser = activeTool == Tool.Eraser
-            currentHelper.setStrokeColor(Color.BLACK)
+            currentHelper.setStrokeColor(if (isEraser) Color.WHITE else Color.BLACK)
             currentHelper.setLimitRect(mutableListOf(limit)).setExcludeRect(excludes)
             currentHelper.openRawDrawing()
             currentHelper.setBrushRawDrawingEnabled(true)
-            currentHelper.setEraserRawDrawingEnabled(isEraser, StrokeStyle.SOFT_ERASER)
-            currentHelper.setStrokeStyle(
-                if (isEraser) StrokeStyle.SOFT_ERASER else TouchHelper.STROKE_STYLE_FOUNTAIN,
-            )
-            currentHelper.setStrokeWidth(if (isEraser) ERASER_WIDTH_PX else STROKE_WIDTH_PX)
-            if (isEraser) {
-                // SOFT_ERASER has its own native parameters. Without them the firmware falls back
-                // to a device default that can disagree sharply with setStrokeWidth().
-                Device.currentDevice().setStrokeParameters(
-                    StrokeStyle.SOFT_ERASER,
-                    floatArrayOf(ERASER_WIDTH_PX, SOFT_ERASER_OPACITY, SOFT_ERASER_BLACK_OPACITY),
-                )
-            }
+            currentHelper.setEraserRawDrawingEnabled(false, StrokeStyle.SOFT_ERASER)
+            // A white Fountain stroke has the same pressure curve and footprint as Pen; it is our
+            // native, low-latency erase preview rather than a fixed-width SOFT_ERASER track.
+            currentHelper.setStrokeStyle(TouchHelper.STROKE_STYLE_FOUNTAIN)
+            currentHelper.setStrokeWidth(STROKE_WIDTH_PX)
             // Critical: leave finger input to Android. Only the stylus belongs to the BOOX pipeline.
             currentHelper.enableFingerTouch(false)
             currentHelper.setRawDrawingRenderEnabled(true)
@@ -576,12 +567,12 @@ class MainActivity : AppCompatActivity() {
 
         fun commitEraser(samples: List<Sample>) {
             if (samples.isEmpty()) return
-            // Firmware widths are screen pixels; persisted samples are document coordinates.
-            // Save the inverse-scaled width so the final erase exactly retains its live footprint.
+            // NaN denotes the same pressure-sensitive width curve as Pen. Older fixed-width erases
+            // retain their recorded width, so existing sketches render unchanged.
             strokes += Stroke(
                 samples = samples,
                 isEraser = true,
-                eraserWidth = ERASER_WIDTH_PX / viewportScale,
+                eraserWidth = PRESSURE_SENSITIVE_ERASER_WIDTH,
             )
             invalidate()
             onDocumentChanged()
@@ -751,7 +742,13 @@ class MainActivity : AppCompatActivity() {
 
         private fun paintFor(stroke: Stroke, pressure: Float): Paint =
             if (stroke.isEraser) {
-                eraserPaint.apply { strokeWidth = stroke.eraserWidth }
+                eraserPaint.apply {
+                    strokeWidth = if (stroke.eraserWidth.isNaN()) {
+                        MIN_STROKE_WIDTH_PX + pressure * STROKE_WIDTH_RANGE_PX
+                    } else {
+                        stroke.eraserWidth
+                    }
+                }
             } else {
                 paint.apply { strokeWidth = MIN_STROKE_WIDTH_PX + pressure * STROKE_WIDTH_RANGE_PX }
             }
@@ -826,8 +823,7 @@ class MainActivity : AppCompatActivity() {
         const val MIN_STROKE_WIDTH_PX = 2f
         const val STROKE_WIDTH_RANGE_PX = 6f
         const val ERASER_WIDTH_PX = 42f
-        const val SOFT_ERASER_OPACITY = 0.5f
-        const val SOFT_ERASER_BLACK_OPACITY = 0.1f
+        const val PRESSURE_SENSITIVE_ERASER_WIDTH = Float.NaN
         const val UNFREEZE_IDLE_MS = 700L
         const val PANEL_SETTLE_MS = 300L
         const val SAVE_DEBOUNCE_MS = 250L
