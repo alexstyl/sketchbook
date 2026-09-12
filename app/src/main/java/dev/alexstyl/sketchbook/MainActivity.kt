@@ -42,6 +42,8 @@ import androidx.compose.ui.unit.dp
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.doOnLayout
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import dev.alexstyl.sketchbook.iconography.Icons
@@ -132,6 +134,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        hideSystemBars()
         initializeBooxSdk()
 
         inputSurface = SurfaceView(this)
@@ -210,12 +214,16 @@ class MainActivity : AppCompatActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) inputSurface.post(::configureRawDrawing)
+        if (hasFocus) {
+            hideSystemBars()
+            inputSurface.post(::configureRawDrawing)
+        }
     }
 
     override fun onResume() {
         super.onResume()
         resumed = true
+        hideSystemBars()
         inputSurface.post(::configureRawDrawing)
     }
 
@@ -240,6 +248,13 @@ class MainActivity : AppCompatActivity() {
         runCatching { HiddenApiBypass.addHiddenApiExemptions("") }
         runCatching { RxManager.Builder.initAppContext(applicationContext) }
         runCatching { EpdController.enablePost(1) }
+    }
+
+    private fun hideSystemBars() {
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            hide(WindowInsetsCompat.Type.systemBars())
+        }
     }
 
     private fun configureRawDrawing() {
