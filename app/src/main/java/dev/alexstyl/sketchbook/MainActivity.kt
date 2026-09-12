@@ -55,6 +55,14 @@ import com.onyx.android.sdk.pen.data.TouchPointList
 import com.onyx.android.sdk.pen.style.StrokeStyle
 import com.onyx.android.sdk.rx.RxManager
 import org.lsposed.hiddenapibypass.HiddenApiBypass
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
+import java.io.DataInputStream
+import java.io.DataOutputStream
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.util.concurrent.Executors
 import com.composeunstyled.UnstyledButton
 import dev.alexstyl.sketchbook.iconography.Eraser
 import dev.alexstyl.sketchbook.iconography.FilePlus
@@ -65,6 +73,7 @@ import kotlin.math.ln
 /** Pen-only BOOX baseline: native Fountain preview with a retained bitmap commit. */
 class MainActivity : AppCompatActivity() {
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val persistenceExecutor = Executors.newSingleThreadExecutor()
     private lateinit var inputSurface: SurfaceView
     private lateinit var sketchView: SketchView
     private lateinit var toolDock: ComposeView
@@ -78,6 +87,12 @@ class MainActivity : AppCompatActivity() {
     private var activeTool by mutableStateOf(Tool.Pen)
     private var strokeTool = Tool.Pen
     private val pendingStroke = ArrayList<Sample>(512)
+    private val documentFile by lazy { File(filesDir, DOCUMENT_FILE_NAME) }
+    private val saveDocument = Runnable {
+        if (!::sketchView.isInitialized) return@Runnable
+        val document = sketchView.snapshot()
+        persistenceExecutor.execute { SketchStore.write(documentFile, document) }
+    }
 
     private val unfreeze = Runnable {
         if (strokeInProgress) return@Runnable
@@ -145,7 +160,9 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         initializeBooxSdk()
         inputSurface = SurfaceView(this)
-        sketchView = SketchView(this)
+        sketchView = SketchView(this, ::scheduleDocumentSave).apply {
+            SketchStore.read(documentFile)?.let(::restore)
+        }
         toolDock = ComposeView(this).apply {
             setContent { ToolDock(activeTool = activeTool, onToolSelected = ::selectTool) }
         }
@@ -209,18 +226,21 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         resumed = false
+        persistDocumentNow()
         mainHandler.removeCallbacks(unfreeze)
         disableRawDrawing()
         super.onPause()
     }
 
     override fun onDestroy() {
+        persistDocumentNow()
         mainHandler.removeCallbacksAndMessages(null)
         runCatching {
             helper?.setRawDrawingEnabled(false)
             helper?.closeRawDrawing()
         }
         helper = null
+        persistenceExecutor.shutdown()
         super.onDestroy()
     }
 
@@ -347,6 +367,20 @@ class MainActivity : AppCompatActivity() {
         inputSurface.post(::configureRawDrawing)
     }
 
+    private fun scheduleDocumentSave() {
+        mainHandler.removeCallbacks(saveDocument)
+        mainHandler.postDelayed(saveDocument, SAVE_DEBOUNCE_MS)
+    }
+
+    private fun persistDocumentNow() {
+        if (!::sketchView.isInitialized) return
+        mainHandler.removeCallbacks(saveDocument)
+        val document = sketchView.snapshot()
+        runCatching {
+            persistenceExecutor.submit { SketchStore.write(documentFile, document) }.get()
+        }
+    }
+
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     @Composable
@@ -407,18 +441,30 @@ class MainActivity : AppCompatActivity() {
 
     private enum class Tool { Pen, Eraser }
 
-    private class SketchView(context: android.content.Context) : View(context) {
+    private class SketchView(
+        context: android.content.Context,
+        private val onDocumentChanged: () -> Unit,
+    ) : View(context) {
         private var bitmap: Bitmap? = null
         private var bitmapCanvas: Canvas? = null
         private val strokes = mutableListOf<Stroke>()
         private var viewportOffsetX = 0f
         private var viewportOffsetY = 0f
+        private var viewportScale = 1f
         private var cachedOffsetX = Float.NaN
         private var cachedOffsetY = Float.NaN
+        private var cachedScale = Float.NaN
         private var trackingFingerGesture = false
         private var panning = false
-        private var lastPanFocusX = 0f
-        private var lastPanFocusY = 0f
+        private var gestureStartDistance = 1f
+        private var gestureStartScale = 1f
+        private var gestureFocusDocumentX = 0f
+        private var gestureFocusDocumentY = 0f
+        private var twoFingerTapCandidate = false
+        private var lastTwoFingerTapAt = 0L
+        private var lastTwoFingerTapX = 0f
+        private var lastTwoFingerTapY = 0f
+        private val touchSlop = android.view.ViewConfiguration.get(context).scaledTouchSlop
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.BLACK
             strokeWidth = MAX_STROKE_WIDTH_PX
@@ -442,17 +488,22 @@ class MainActivity : AppCompatActivity() {
             bitmapCanvas = Canvas(replacement)
             cachedOffsetX = Float.NaN
             cachedOffsetY = Float.NaN
+            cachedScale = Float.NaN
         }
 
         fun documentPoint(screenX: Float, screenY: Float, pressure: Float): Sample =
-            Sample(screenX - viewportOffsetX, screenY - viewportOffsetY, pressure)
+            Sample(
+                (screenX - viewportOffsetX) / viewportScale,
+                (screenY - viewportOffsetY) / viewportScale,
+                pressure,
+            )
 
         fun commit(samples: List<Sample>) {
-            appendStroke(Stroke(samples, isEraser = false))
+            appendStroke(Stroke(samples, isEraser = false, scaleAtCreation = viewportScale))
         }
 
         fun erase(samples: List<Sample>) {
-            appendStroke(Stroke(samples, isEraser = true))
+            appendStroke(Stroke(samples, isEraser = true, scaleAtCreation = viewportScale))
         }
 
         private fun appendStroke(stroke: Stroke) {
@@ -464,10 +515,12 @@ class MainActivity : AppCompatActivity() {
             bitmapCanvas?.let { canvas ->
                 canvas.save()
                 canvas.translate(viewportOffsetX, viewportOffsetY)
+                canvas.scale(viewportScale, viewportScale)
                 drawStroke(canvas, stroke)
                 canvas.restore()
             }
             invalidate()
+            onDocumentChanged()
         }
 
         fun clear() {
@@ -475,6 +528,27 @@ class MainActivity : AppCompatActivity() {
             bitmapCanvas?.drawColor(Color.WHITE)
             cachedOffsetX = viewportOffsetX
             cachedOffsetY = viewportOffsetY
+            cachedScale = viewportScale
+            invalidate()
+            onDocumentChanged()
+        }
+
+        fun snapshot(): SketchDocument = SketchDocument(
+            viewportOffsetX = viewportOffsetX,
+            viewportOffsetY = viewportOffsetY,
+            viewportScale = viewportScale,
+            strokes = strokes.toList(),
+        )
+
+        fun restore(document: SketchDocument) {
+            viewportOffsetX = document.viewportOffsetX
+            viewportOffsetY = document.viewportOffsetY
+            viewportScale = document.viewportScale.coerceIn(MIN_ZOOM, MAX_ZOOM)
+            strokes.clear()
+            strokes += document.strokes
+            cachedOffsetX = Float.NaN
+            cachedOffsetY = Float.NaN
+            cachedScale = Float.NaN
             invalidate()
         }
 
@@ -488,8 +562,13 @@ class MainActivity : AppCompatActivity() {
                     if (event.pointerCount == 2 && bothPointersAreFingers(event)) {
                         panning = true
                         trackingFingerGesture = true
-                        lastPanFocusX = (event.getX(0) + event.getX(1)) / 2f
-                        lastPanFocusY = (event.getY(0) + event.getY(1)) / 2f
+                        val focusX = (event.getX(0) + event.getX(1)) / 2f
+                        val focusY = (event.getY(0) + event.getY(1)) / 2f
+                        gestureStartDistance = pointerDistance(event).coerceAtLeast(1f)
+                        gestureStartScale = viewportScale
+                        gestureFocusDocumentX = (focusX - viewportOffsetX) / viewportScale
+                        gestureFocusDocumentY = (focusY - viewportOffsetY) / viewportScale
+                        twoFingerTapCandidate = true
                     }
                     return trackingFingerGesture
                 }
@@ -497,22 +576,31 @@ class MainActivity : AppCompatActivity() {
                     if (panning && event.pointerCount >= 2) {
                         val focusX = (event.getX(0) + event.getX(1)) / 2f
                         val focusY = (event.getY(0) + event.getY(1)) / 2f
-                        viewportOffsetX += focusX - lastPanFocusX
-                        viewportOffsetY += focusY - lastPanFocusY
-                        lastPanFocusX = focusX
-                        lastPanFocusY = focusY
+                        if (twoFingerTapCandidate && gestureMoved(event, focusX, focusY)) {
+                            twoFingerTapCandidate = false
+                        }
+                        viewportScale = (gestureStartScale * pointerDistance(event) / gestureStartDistance)
+                            .coerceIn(MIN_ZOOM, MAX_ZOOM)
+                        viewportOffsetX = focusX - gestureFocusDocumentX * viewportScale
+                        viewportOffsetY = focusY - gestureFocusDocumentY * viewportScale
                         invalidate()
+                        onDocumentChanged()
                     }
                     return trackingFingerGesture
                 }
                 android.view.MotionEvent.ACTION_POINTER_UP -> {
-                    if (event.pointerCount == 2) panning = false
+                    if (event.pointerCount == 2) {
+                        if (twoFingerTapCandidate) registerTwoFingerTap(event)
+                        twoFingerTapCandidate = false
+                        panning = false
+                    }
                     return trackingFingerGesture
                 }
                 android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
                     val handled = trackingFingerGesture
                     panning = false
                     trackingFingerGesture = false
+                    twoFingerTapCandidate = false
                     return handled
                 }
             }
@@ -527,28 +615,41 @@ class MainActivity : AppCompatActivity() {
 
         private fun rebuildDocumentBitmapIfNeeded() {
             val canvas = bitmapCanvas ?: return
-            if (cachedOffsetX == viewportOffsetX && cachedOffsetY == viewportOffsetY) return
+            if (
+                cachedOffsetX == viewportOffsetX &&
+                cachedOffsetY == viewportOffsetY &&
+                cachedScale == viewportScale
+            ) return
             canvas.drawColor(Color.WHITE)
             canvas.save()
             canvas.translate(viewportOffsetX, viewportOffsetY)
+            canvas.scale(viewportScale, viewportScale)
             strokes.forEach { drawStroke(canvas, it) }
             canvas.restore()
             cachedOffsetX = viewportOffsetX
             cachedOffsetY = viewportOffsetY
+            cachedScale = viewportScale
         }
 
         private fun drawStroke(canvas: Canvas, stroke: Stroke) {
             val strokePaint = if (stroke.isEraser) eraserPaint else paint
+            val widthScale = stroke.scaleAtCreation
             when (stroke.samples.size) {
                 0 -> Unit
                 1 -> {
                     val sample = stroke.samples.first()
-                    if (!stroke.isEraser) strokePaint.strokeWidth = pressureWidth(sample.pressure)
+                    strokePaint.strokeWidth = if (stroke.isEraser) {
+                        ERASER_WIDTH_PX / widthScale
+                    } else {
+                        pressureWidth(sample.pressure) / widthScale
+                    }
                     canvas.drawPoint(sample.x, sample.y, strokePaint)
                 }
                 else -> stroke.samples.zipWithNext().forEach { (from, to) ->
-                    if (!stroke.isEraser) {
-                        strokePaint.strokeWidth = pressureWidth((from.pressure + to.pressure) / 2f)
+                    strokePaint.strokeWidth = if (stroke.isEraser) {
+                        ERASER_WIDTH_PX / widthScale
+                    } else {
+                        pressureWidth((from.pressure + to.pressure) / 2f) / widthScale
                     }
                     canvas.drawLine(from.x, from.y, to.x, to.y, strokePaint)
                 }
@@ -558,9 +659,117 @@ class MainActivity : AppCompatActivity() {
         private fun bothPointersAreFingers(event: android.view.MotionEvent): Boolean =
             event.getToolType(0) == android.view.MotionEvent.TOOL_TYPE_FINGER &&
                 event.getToolType(1) == android.view.MotionEvent.TOOL_TYPE_FINGER
+
+        private fun pointerDistance(event: android.view.MotionEvent): Float {
+            val x = event.getX(1) - event.getX(0)
+            val y = event.getY(1) - event.getY(0)
+            return kotlin.math.sqrt(x * x + y * y)
+        }
+
+        private fun gestureMoved(
+            event: android.view.MotionEvent,
+            focusX: Float,
+            focusY: Float,
+        ): Boolean =
+            kotlin.math.hypot(
+                focusX - (gestureFocusDocumentX * gestureStartScale + viewportOffsetX),
+                focusY - (gestureFocusDocumentY * gestureStartScale + viewportOffsetY),
+            ) > touchSlop || kotlin.math.abs(pointerDistance(event) - gestureStartDistance) > touchSlop
+
+        private fun registerTwoFingerTap(event: android.view.MotionEvent) {
+            val focusX = (event.getX(0) + event.getX(1)) / 2f
+            val focusY = (event.getY(0) + event.getY(1)) / 2f
+            val isDoubleTap = event.eventTime - lastTwoFingerTapAt <=
+                android.view.ViewConfiguration.getDoubleTapTimeout() &&
+                kotlin.math.hypot(focusX - lastTwoFingerTapX, focusY - lastTwoFingerTapY) <= touchSlop * 2
+            if (isDoubleTap) {
+                resetZoomAt(focusX, focusY)
+                lastTwoFingerTapAt = 0L
+            } else {
+                lastTwoFingerTapAt = event.eventTime
+                lastTwoFingerTapX = focusX
+                lastTwoFingerTapY = focusY
+            }
+        }
+
+        private fun resetZoomAt(focusX: Float, focusY: Float) {
+            val documentX = (focusX - viewportOffsetX) / viewportScale
+            val documentY = (focusY - viewportOffsetY) / viewportScale
+            viewportScale = 1f
+            viewportOffsetX = focusX - documentX
+            viewportOffsetY = focusY - documentY
+            invalidate()
+            onDocumentChanged()
+        }
     }
 
-    private data class Stroke(val samples: List<Sample>, val isEraser: Boolean)
+    private data class Stroke(
+        val samples: List<Sample>,
+        val isEraser: Boolean,
+        val scaleAtCreation: Float,
+    )
+
+    private data class SketchDocument(
+        val viewportOffsetX: Float,
+        val viewportOffsetY: Float,
+        val viewportScale: Float,
+        val strokes: List<Stroke>,
+    )
+
+    private object SketchStore {
+        private const val MAGIC = 0x534B4554 // SKET
+        private const val VERSION = 1
+        private const val MAX_STROKES = 100_000
+        private const val MAX_SAMPLES_PER_STROKE = 100_000
+
+        fun read(file: File): SketchDocument? = runCatching {
+            DataInputStream(BufferedInputStream(FileInputStream(file))).use { input ->
+                check(input.readInt() == MAGIC)
+                check(input.readInt() == VERSION)
+                val offsetX = input.readFloat()
+                val offsetY = input.readFloat()
+                val scale = input.readFloat()
+                val strokeCount = input.readInt()
+                check(strokeCount in 0..MAX_STROKES)
+                val strokes = ArrayList<Stroke>(strokeCount)
+                repeat(strokeCount) {
+                    val isEraser = input.readBoolean()
+                    val scaleAtCreation = input.readFloat()
+                    val sampleCount = input.readInt()
+                    check(sampleCount in 0..MAX_SAMPLES_PER_STROKE)
+                    val samples = ArrayList<Sample>(sampleCount)
+                    repeat(sampleCount) {
+                        samples += Sample(input.readFloat(), input.readFloat(), input.readFloat())
+                    }
+                    strokes += Stroke(samples, isEraser, scaleAtCreation)
+                }
+                SketchDocument(offsetX, offsetY, scale, strokes)
+            }
+        }.getOrNull()
+
+        fun write(file: File, document: SketchDocument) {
+            val temporary = File(file.parentFile, "${file.name}.tmp")
+            DataOutputStream(BufferedOutputStream(FileOutputStream(temporary))).use { output ->
+                output.writeInt(MAGIC)
+                output.writeInt(VERSION)
+                output.writeFloat(document.viewportOffsetX)
+                output.writeFloat(document.viewportOffsetY)
+                output.writeFloat(document.viewportScale)
+                output.writeInt(document.strokes.size)
+                document.strokes.forEach { stroke ->
+                    output.writeBoolean(stroke.isEraser)
+                    output.writeFloat(stroke.scaleAtCreation)
+                    output.writeInt(stroke.samples.size)
+                    stroke.samples.forEach { sample ->
+                        output.writeFloat(sample.x)
+                        output.writeFloat(sample.y)
+                        output.writeFloat(sample.pressure)
+                    }
+                }
+            }
+            check(temporary.renameTo(file)) { "Could not replace ${file.name}" }
+        }
+    }
 
     private companion object {
         const val MIN_STROKE_WIDTH_PX = 2f
@@ -573,6 +782,10 @@ class MainActivity : AppCompatActivity() {
         const val ERASER_WIDTH_PX = 42f
         const val SOFT_ERASER_OPACITY = 0.5f
         const val SOFT_ERASER_BLACK_OPACITY = 0.1f
+        const val MIN_ZOOM = 0.25f
+        const val MAX_ZOOM = 4f
+        const val SAVE_DEBOUNCE_MS = 250L
+        const val DOCUMENT_FILE_NAME = "sketchbook-document-v2.bin"
 
         fun pressureWidth(pressure: Float): Float =
             MIN_STROKE_WIDTH_PX + (MAX_STROKE_WIDTH_PX - MIN_STROKE_WIDTH_PX) *
