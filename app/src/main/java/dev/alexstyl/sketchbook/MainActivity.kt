@@ -41,7 +41,7 @@ import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import dev.alexstyl.sketchbook.iconography.Icons
 import dev.alexstyl.sketchbook.iconography.Eraser
 import dev.alexstyl.sketchbook.iconography.PenLine
-import dev.alexstyl.sketchbook.iconography.Trash2
+import dev.alexstyl.sketchbook.iconography.FilePlus
 import com.composeunstyled.UnstyledButton
 import com.onyx.android.sdk.api.device.epd.EpdController
 import com.onyx.android.sdk.api.device.epd.UpdateMode
@@ -139,7 +139,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         clearButton = ComposeView(this).apply {
-            setContent { ClearButton(onClear = ::confirmClearSketch) }
+            setContent { NewSketchButton(onNewSketch = ::confirmNewSketch) }
         }
         toolRail.doOnLayout { inputSurface.post(::configureRawDrawing) }
         clearButton.doOnLayout { inputSurface.post(::configureRawDrawing) }
@@ -316,12 +316,12 @@ class MainActivity : AppCompatActivity() {
         inputSurface.post(::configureRawDrawing)
     }
 
-    private fun confirmClearSketch() {
+    private fun confirmNewSketch() {
         AlertDialog.Builder(this)
-            .setTitle("Clear sketch?")
-            .setMessage("This removes all marks from the current sketch.")
+            .setTitle("New sketch?")
+            .setMessage("This starts a new blank sketch.")
             .setNegativeButton("Cancel", null)
-            .setPositiveButton("Clear") { _, _ -> clearSketch() }
+            .setPositiveButton("New sketch") { _, _ -> clearSketch() }
             .show()
     }
 
@@ -363,12 +363,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     @Composable
-    private fun ClearButton(onClear: () -> Unit) {
+    private fun NewSketchButton(onNewSketch: () -> Unit) {
         ToolIconButton(
-            icon = Icons.Trash2,
-            contentDescription = "Clear sketch",
+            icon = Icons.FilePlus,
+            contentDescription = "New sketch",
             selected = false,
-            onClick = onClear,
+            onClick = onNewSketch,
         )
     }
 

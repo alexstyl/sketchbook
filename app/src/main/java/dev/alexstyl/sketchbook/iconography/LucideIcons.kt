@@ -1,12 +1,10 @@
 package dev.alexstyl.sketchbook.iconography
 
 /*
- * Icons from Lucide: pen-line, eraser, and trash-2.
+ * Icons from Lucide: pen-line, eraser, and file-plus.
  * ISC License, Copyright (c) 2026 Lucide Icons and Contributors.
  * https://lucide.dev/license
  *
- * trash-2 is derived from Feather and is also available under the MIT License,
- * Copyright (c) 2013-present Cole Bemis.
  */
 
 import androidx.compose.ui.graphics.Color
@@ -88,9 +86,9 @@ val Icons.Eraser: ImageVector
         ) { moveTo(5.082f, 11.09f); lineToRelative(8.828f, 8.828f) }
     }.build().also { eraser = it }
 
-val Icons.Trash2: ImageVector
-    get() = trash2 ?: ImageVector.Builder(
-        name = "trash-2",
+val Icons.FilePlus: ImageVector
+    get() = filePlus ?: ImageVector.Builder(
+        name = "file-plus",
         defaultWidth = 24.dp,
         defaultHeight = 24.dp,
         viewportWidth = 24f,
@@ -102,51 +100,47 @@ val Icons.Trash2: ImageVector
             strokeLineWidth = 2f,
             strokeLineCap = StrokeCap.Round,
             strokeLineJoin = StrokeJoin.Round,
-        ) { moveTo(10f, 11f); verticalLineToRelative(6f) }
-        path(
-            fill = SolidColor(Color.Transparent),
-            stroke = SolidColor(Color.Black),
-            strokeLineWidth = 2f,
-            strokeLineCap = StrokeCap.Round,
-            strokeLineJoin = StrokeJoin.Round,
-        ) { moveTo(14f, 11f); verticalLineToRelative(6f) }
-        path(
-            fill = SolidColor(Color.Transparent),
-            stroke = SolidColor(Color.Black),
-            strokeLineWidth = 2f,
-            strokeLineCap = StrokeCap.Round,
-            strokeLineJoin = StrokeJoin.Round,
         ) {
-            moveTo(19f, 6f)
-            verticalLineToRelative(14f)
-            arcToRelative(2f, 2f, 0f, false, true, -2f, 2f)
-            horizontalLineTo(7f)
+            moveTo(6f, 22f)
             arcToRelative(2f, 2f, 0f, false, true, -2f, -2f)
-            verticalLineTo(6f)
-        }
-        path(
-            fill = SolidColor(Color.Transparent),
-            stroke = SolidColor(Color.Black),
-            strokeLineWidth = 2f,
-            strokeLineCap = StrokeCap.Round,
-            strokeLineJoin = StrokeJoin.Round,
-        ) { moveTo(3f, 6f); horizontalLineToRelative(18f) }
-        path(
-            fill = SolidColor(Color.Transparent),
-            stroke = SolidColor(Color.Black),
-            strokeLineWidth = 2f,
-            strokeLineCap = StrokeCap.Round,
-            strokeLineJoin = StrokeJoin.Round,
-        ) {
-            moveTo(8f, 6f)
             verticalLineTo(4f)
             arcToRelative(2f, 2f, 0f, false, true, 2f, -2f)
-            horizontalLineToRelative(4f)
-            arcToRelative(2f, 2f, 0f, false, true, 2f, 2f)
-            verticalLineToRelative(2f)
+            horizontalLineToRelative(8f)
+            arcToRelative(2.4f, 2.4f, 0f, false, true, 1.704f, 0.706f)
+            lineToRelative(3.588f, 3.588f)
+            arcTo(2.4f, 2.4f, 0f, false, true, 20f, 8f)
+            verticalLineToRelative(12f)
+            arcToRelative(2f, 2f, 0f, false, true, -2f, 2f)
+            close()
         }
-    }.build().also { trash2 = it }
+        path(
+            fill = SolidColor(Color.Transparent),
+            stroke = SolidColor(Color.Black),
+            strokeLineWidth = 2f,
+            strokeLineCap = StrokeCap.Round,
+            strokeLineJoin = StrokeJoin.Round,
+        ) {
+            moveTo(14f, 2f)
+            verticalLineToRelative(5f)
+            arcToRelative(1f, 1f, 0f, false, false, 1f, 1f)
+            horizontalLineToRelative(5f)
+        }
+        path(
+            fill = SolidColor(Color.Transparent),
+            stroke = SolidColor(Color.Black),
+            strokeLineWidth = 2f,
+            strokeLineCap = StrokeCap.Round,
+            strokeLineJoin = StrokeJoin.Round,
+        ) { moveTo(9f, 15f); horizontalLineToRelative(6f) }
+        path(
+            fill = SolidColor(Color.Transparent),
+            stroke = SolidColor(Color.Black),
+            strokeLineWidth = 2f,
+            strokeLineCap = StrokeCap.Round,
+            strokeLineJoin = StrokeJoin.Round,
+        ) { moveTo(12f, 18f); verticalLineToRelative(-6f) }
+    }.build().also { filePlus = it }
 
 private var penLine: ImageVector? = null
 private var eraser: ImageVector? = null
-private var trash2: ImageVector? = null
+private var filePlus: ImageVector? = null
