@@ -69,6 +69,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.concurrent.Executors
+import kotlin.math.ln
 
 /**
  * A deliberately small BOOX raw-ink sample.
@@ -90,6 +91,7 @@ class MainActivity : AppCompatActivity() {
     private var attached = false
     private var resumed = false
     private var strokeInProgress = false
+    private var maxTouchPressure = DEFAULT_MAX_TOUCH_PRESSURE
     private var activeTool by mutableStateOf<Tool>(Tool.Pen)
     private var strokeTool: Tool = Tool.Pen
     private val pendingStroke = ArrayList<Sample>(512)
@@ -288,6 +290,10 @@ class MainActivity : AppCompatActivity() {
         runCatching { HiddenApiBypass.addHiddenApiExemptions("") }
         runCatching { RxManager.Builder.initAppContext(applicationContext) }
         runCatching { EpdController.enablePost(1) }
+        runCatching { EpdController.getMaxTouchPressure() }
+            .getOrNull()
+            ?.takeIf { it > 0f }
+            ?.let { maxTouchPressure = it }
     }
 
     private fun hideSystemBars() {
@@ -307,7 +313,7 @@ class MainActivity : AppCompatActivity() {
             currentHelper.setRawDrawingEnabled(false)
             currentHelper.closeRawDrawing()
             val isEraser = activeTool == Tool.Eraser
-            currentHelper.setStrokeWidth(if (isEraser) ERASER_WIDTH_PX else STROKE_WIDTH_PX)
+            currentHelper.setStrokeWidth(if (isEraser) ERASER_WIDTH_PX else livePenWidth())
             currentHelper.setStrokeColor(Color.BLACK)
             currentHelper.setLimitRect(mutableListOf(limit)).setExcludeRect(excludes)
             currentHelper.openRawDrawing()
@@ -326,6 +332,10 @@ class MainActivity : AppCompatActivity() {
                     StrokeStyle.SOFT_ERASER,
                     floatArrayOf(ERASER_WIDTH_PX, SOFT_ERASER_OPACITY, SOFT_ERASER_BLACK_OPACITY),
                 )
+            } else {
+                // ForestNote feeds BOOX a representative point on the same pressure curve used
+                // by its committed renderer. The firmware then supplies its native live dynamics.
+                currentHelper.setStrokeWidth(livePenWidth())
             }
             // Critical: leave finger input to Android. Only the stylus belongs to the BOOX pipeline.
             currentHelper.enableFingerTouch(false)
@@ -373,8 +383,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun addPoint(point: TouchPoint) {
-        pendingStroke += sketchView.documentPoint(point.getX(), point.getY(), point.getPressure())
+        pendingStroke += sketchView.documentPoint(
+            point.getX(),
+            point.getY(),
+            point.getPressure() / maxTouchPressure,
+        )
     }
+
+    private fun livePenWidth(): Float =
+        MIN_STROKE_WIDTH_PX + STROKE_WIDTH_RANGE_PX *
+            (ln(3f * LIVE_PEN_REFERENCE_PRESSURE + 1f) / LN_4)
 
     private fun selectTool(tool: Tool) {
         if (activeTool == tool) return
@@ -567,7 +585,7 @@ class MainActivity : AppCompatActivity() {
             Sample(
                 (screenX - viewportOffsetX) / viewportScale,
                 (screenY - viewportOffsetY) / viewportScale,
-                normalizePressure(pressure),
+                pressure.coerceIn(0f, 1f),
             )
 
         fun commit(samples: List<Sample>) {
@@ -756,13 +774,12 @@ class MainActivity : AppCompatActivity() {
             if (stroke.isEraser) {
                 eraserPaint.apply { strokeWidth = stroke.eraserWidth }
             } else {
-                paint.apply { strokeWidth = MIN_STROKE_WIDTH_PX + pressure * STROKE_WIDTH_RANGE_PX }
+                paint.apply { strokeWidth = pressureWidth(pressure) }
             }
 
-        private fun normalizePressure(pressure: Float): Float {
-            val normalized = if (pressure > 1f) pressure / EpdController.MAX_TOUCH_PRESSURE else pressure
-            return normalized.coerceIn(0f, 1f)
-        }
+        private fun pressureWidth(pressure: Float): Float =
+            MIN_STROKE_WIDTH_PX + STROKE_WIDTH_RANGE_PX *
+                (ln(3f * pressure.coerceIn(0f, 1f) + 1f) / LN_4)
     }
 
     private object SketchStore {
@@ -827,9 +844,10 @@ class MainActivity : AppCompatActivity() {
     private companion object {
         const val STROKE_WIDTH_PX = 5f
         const val MIN_STROKE_WIDTH_PX = 2f
-        // The firmware preview is configured at 5px. Keep the committed pressure curve within
-        // that same 2–5px envelope so lifting the pen cannot make a line visually expand.
         const val STROKE_WIDTH_RANGE_PX = 3f
+        const val LIVE_PEN_REFERENCE_PRESSURE = 0.25f
+        const val DEFAULT_MAX_TOUCH_PRESSURE = 4095f
+        const val LN_4 = 1.3862944f
         const val ERASER_WIDTH_PX = 42f
         const val SOFT_ERASER_OPACITY = 0.5f
         const val SOFT_ERASER_BLACK_OPACITY = 0.1f
