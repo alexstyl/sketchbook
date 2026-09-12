@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
+import android.app.AlertDialog
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -56,6 +57,7 @@ import com.onyx.android.sdk.rx.RxManager
 import org.lsposed.hiddenapibypass.HiddenApiBypass
 import com.composeunstyled.UnstyledButton
 import dev.alexstyl.sketchbook.iconography.Eraser
+import dev.alexstyl.sketchbook.iconography.FilePlus
 import dev.alexstyl.sketchbook.iconography.Icons
 import dev.alexstyl.sketchbook.iconography.PenLine
 import kotlin.math.ln
@@ -66,6 +68,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var inputSurface: SurfaceView
     private lateinit var sketchView: SketchView
     private lateinit var toolDock: ComposeView
+    private lateinit var newSketchButton: ComposeView
     private var helper: TouchHelper? = null
     private var systemInsets = WindowInsetsCompat.CONSUMED
     private var attached = false
@@ -146,6 +149,9 @@ class MainActivity : AppCompatActivity() {
         toolDock = ComposeView(this).apply {
             setContent { ToolDock(activeTool = activeTool, onToolSelected = ::selectTool) }
         }
+        newSketchButton = ComposeView(this).apply {
+            setContent { NewSketchButton(onNewSketch = ::confirmNewSketch) }
+        }
         val root = FrameLayout(this).apply {
             setBackgroundColor(Color.WHITE)
             addView(inputSurface, FrameLayout.LayoutParams(-1, -1))
@@ -158,6 +164,17 @@ class MainActivity : AppCompatActivity() {
                     android.view.Gravity.CENTER_VERTICAL or android.view.Gravity.END,
                 ).apply { marginEnd = dp(16) },
             )
+            addView(
+                newSketchButton,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    android.view.Gravity.TOP or android.view.Gravity.END,
+                ).apply {
+                    topMargin = dp(16)
+                    marginEnd = dp(16)
+                },
+            )
         }
         setContentView(root)
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
@@ -167,6 +184,7 @@ class MainActivity : AppCompatActivity() {
         }
         ViewCompat.requestApplyInsets(root)
         toolDock.doOnLayout { inputSurface.post(::configureRawDrawing) }
+        newSketchButton.doOnLayout { inputSurface.post(::configureRawDrawing) }
         inputSurface.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) = Unit
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
@@ -269,6 +287,18 @@ class MainActivity : AppCompatActivity() {
                 toolDock.getLocationInWindow(location)
                 add(Rect(location[0], location[1], location[0] + toolDock.width, location[1] + toolDock.height))
             }
+            if (newSketchButton.isLaidOut) {
+                val location = IntArray(2)
+                newSketchButton.getLocationInWindow(location)
+                add(
+                    Rect(
+                        location[0],
+                        location[1],
+                        location[0] + newSketchButton.width,
+                        location[1] + newSketchButton.height,
+                    ),
+                )
+            }
             if (isEmpty()) add(Rect(0, 0, 1, 1))
         }
     }
@@ -299,6 +329,22 @@ class MainActivity : AppCompatActivity() {
             helper = null
             inputSurface.post(::configureRawDrawing)
         }
+    }
+
+    private fun confirmNewSketch() {
+        AlertDialog.Builder(this)
+            .setTitle("New sketch?")
+            .setMessage("This starts a new blank sketch.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("New sketch") { _, _ -> clearSketch() }
+            .show()
+    }
+
+    private fun clearSketch() {
+        mainHandler.removeCallbacks(unfreeze)
+        helper?.let(::disableFirmware)
+        sketchView.clear()
+        inputSurface.post(::configureRawDrawing)
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
@@ -345,6 +391,16 @@ class MainActivity : AppCompatActivity() {
                 modifier = Modifier.size(32.dp),
             )
         }
+    }
+
+    @Composable
+    private fun NewSketchButton(onNewSketch: () -> Unit) {
+        ToolButton(
+            icon = Icons.FilePlus,
+            contentDescription = "New sketch",
+            selected = false,
+            onClick = onNewSketch,
+        )
     }
 
     private data class Sample(val x: Float, val y: Float, val pressure: Float)
@@ -403,6 +459,11 @@ class MainActivity : AppCompatActivity() {
                     canvas.drawLine(from.x, from.y, to.x, to.y, eraserPaint)
                 }
             }
+            invalidate()
+        }
+
+        fun clear() {
+            bitmapCanvas?.drawColor(Color.WHITE)
             invalidate()
         }
 
