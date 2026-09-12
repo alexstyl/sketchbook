@@ -5,7 +5,6 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
-import android.app.AlertDialog
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -24,34 +23,27 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color as ComposeColor
-import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.rememberVectorPainter
+import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.unit.dp
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.doOnLayout
-import androidx.compose.ui.graphics.vector.rememberVectorPainter
-import dev.alexstyl.sketchbook.iconography.Icons
-import dev.alexstyl.sketchbook.iconography.Eraser
-import dev.alexstyl.sketchbook.iconography.PenLine
-import dev.alexstyl.sketchbook.iconography.FilePlus
-import com.composeunstyled.UnstyledButton
 import com.onyx.android.sdk.api.device.epd.EpdController
 import com.onyx.android.sdk.api.device.epd.UpdateMode
 import com.onyx.android.sdk.device.Device
@@ -62,65 +54,45 @@ import com.onyx.android.sdk.pen.data.TouchPointList
 import com.onyx.android.sdk.pen.style.StrokeStyle
 import com.onyx.android.sdk.rx.RxManager
 import org.lsposed.hiddenapibypass.HiddenApiBypass
-import java.io.BufferedInputStream
-import java.io.BufferedOutputStream
-import java.io.DataInputStream
-import java.io.DataOutputStream
-import java.io.File
-import java.io.FileInputStream
-import java.io.FileOutputStream
-import java.util.concurrent.Executors
+import com.composeunstyled.UnstyledButton
+import dev.alexstyl.sketchbook.iconography.Eraser
+import dev.alexstyl.sketchbook.iconography.Icons
+import dev.alexstyl.sketchbook.iconography.PenLine
 import kotlin.math.ln
 
-/**
- * A deliberately small BOOX raw-ink sample.
- *
- * The SurfaceView is only the firmware's live-ink target. SketchView is the canonical document that
- * owns committed strokes. Keeping those two layers separate is the important part: firmware ink is
- * instant but transient; Android's canvas is persistent and always safe to redraw.
- */
+/** Pen-only BOOX baseline: native Fountain preview with a retained bitmap commit. */
 class MainActivity : AppCompatActivity() {
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val persistenceExecutor = Executors.newSingleThreadExecutor()
     private lateinit var inputSurface: SurfaceView
     private lateinit var sketchView: SketchView
-    private lateinit var toolRail: ComposeView
-    private lateinit var clearButton: ComposeView
-
+    private lateinit var toolDock: ComposeView
     private var helper: TouchHelper? = null
     private var systemInsets = WindowInsetsCompat.CONSUMED
     private var attached = false
     private var resumed = false
     private var strokeInProgress = false
     private var maxTouchPressure = DEFAULT_MAX_TOUCH_PRESSURE
-    private var activeTool by mutableStateOf<Tool>(Tool.Pen)
-    private var strokeTool: Tool = Tool.Pen
+    private var activeTool by mutableStateOf(Tool.Pen)
+    private var strokeTool = Tool.Pen
     private val pendingStroke = ArrayList<Sample>(512)
-    private val documentFile by lazy { File(filesDir, DOCUMENT_FILE_NAME) }
-    private val saveDocument = Runnable {
-        if (!::sketchView.isInitialized) return@Runnable
-        val document = sketchView.snapshot()
-        persistenceExecutor.execute { SketchStore.write(documentFile, document) }
-    }
+
     private val unfreeze = Runnable {
         if (strokeInProgress) return@Runnable
         val currentHelper = helper ?: return@Runnable
         runCatching {
-            // ForestNote's post-stroke release: drop only the preview briefly, then restore it.
-            // This gives Android/system gestures a clean panel without interrupting live writing.
             currentHelper.setRawDrawingRenderEnabled(false)
             sketchView.invalidate()
             mainHandler.postDelayed({
-                if (!strokeInProgress && resumed) {
-                    currentHelper.setRawDrawingRenderEnabled(true)
-                }
+                if (!strokeInProgress && resumed) currentHelper.setRawDrawingRenderEnabled(true)
             }, PANEL_SETTLE_MS)
         }
     }
 
     private val rawCallback = object : RawInputCallback() {
         override fun onBeginRawDrawing(isEraser: Boolean, point: TouchPoint?) {
-            beginRawStroke(activeTool, point)
+            // BOOX reports erasing through this generic callback on some firmware builds and does
+            // not reliably set isEraser. The selected tool is the canonical routing source.
+            beginStroke(activeTool, point)
         }
 
         override fun onRawDrawingTouchPointMoveReceived(point: TouchPoint?) {
@@ -130,24 +102,22 @@ class MainActivity : AppCompatActivity() {
         override fun onRawDrawingTouchPointListReceived(points: TouchPointList?) = Unit
 
         override fun onEndRawDrawing(isEraser: Boolean, point: TouchPoint?) {
-            endRawStroke(point)
+            endStroke(point)
         }
 
         override fun onBeginRawErasing(isEraser: Boolean, point: TouchPoint?) {
-            beginRawStroke(Tool.Eraser, point)
+            beginStroke(Tool.Eraser, point)
         }
-
         override fun onRawErasingTouchPointMoveReceived(point: TouchPoint?) {
             point?.let(::addPoint)
         }
-
         override fun onRawErasingTouchPointListReceived(points: TouchPointList?) = Unit
         override fun onEndRawErasing(isEraser: Boolean, point: TouchPoint?) {
-            endRawStroke(point)
+            endStroke(point)
         }
     }
 
-    private fun beginRawStroke(tool: Tool, point: TouchPoint?) {
+    private fun beginStroke(tool: Tool, point: TouchPoint?) {
         strokeInProgress = true
         strokeTool = tool
         mainHandler.removeCallbacks(unfreeze)
@@ -155,16 +125,14 @@ class MainActivity : AppCompatActivity() {
         point?.let(::addPoint)
     }
 
-    private fun endRawStroke(point: TouchPoint?) {
+    private fun endStroke(point: TouchPoint?) {
         point?.let(::addPoint)
         val stroke = pendingStroke.toList()
         val tool = strokeTool
         pendingStroke.clear()
         strokeInProgress = false
         sketchView.post {
-            if (tool == Tool.Eraser) sketchView.commitEraser(stroke) else sketchView.commit(stroke)
-            // Do not toggle firmware capture on every pen-up: it can erase the preview mid-write.
-            // Wait until the writer pauses, then briefly release only the render passthrough.
+            if (tool == Tool.Eraser) sketchView.erase(stroke) else sketchView.commit(stroke)
             mainHandler.removeCallbacks(unfreeze)
             mainHandler.postDelayed(unfreeze, UNFREEZE_IDLE_MS)
         }
@@ -172,63 +140,23 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        WindowCompat.setDecorFitsSystemWindows(window, false)
-        hideSystemBars()
         initializeBooxSdk()
-
         inputSurface = SurfaceView(this)
-        sketchView = SketchView(this, ::scheduleDocumentSave).apply {
-            SketchStore.read(documentFile)?.let(::restore)
+        sketchView = SketchView(this)
+        toolDock = ComposeView(this).apply {
+            setContent { ToolDock(activeTool = activeTool, onToolSelected = ::selectTool) }
         }
-        toolRail = ComposeView(this).apply {
-            setContent {
-                ToolRail(
-                    activeTool = activeTool,
-                    onToolSelected = ::selectTool,
-                )
-            }
-        }
-        clearButton = ComposeView(this).apply {
-            setContent { NewSketchButton(onNewSketch = ::confirmNewSketch) }
-        }
-        toolRail.doOnLayout { inputSurface.post(::configureRawDrawing) }
-        clearButton.doOnLayout { inputSurface.post(::configureRawDrawing) }
         val root = FrameLayout(this).apply {
             setBackgroundColor(Color.WHITE)
+            addView(inputSurface, FrameLayout.LayoutParams(-1, -1))
+            addView(sketchView, FrameLayout.LayoutParams(-1, -1))
             addView(
-                inputSurface,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                ),
-            )
-            addView(
-                sketchView,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                ),
-            )
-            addView(
-                toolRail,
+                toolDock,
                 FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.WRAP_CONTENT,
                     FrameLayout.LayoutParams.WRAP_CONTENT,
                     android.view.Gravity.CENTER_VERTICAL or android.view.Gravity.END,
-                ).apply {
-                    marginEnd = dp(16)
-                },
-            )
-            addView(
-                clearButton,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    android.view.Gravity.TOP or android.view.Gravity.END,
-                ).apply {
-                    topMargin = dp(16)
-                    marginEnd = dp(16)
-                },
+                ).apply { marginEnd = dp(16) },
             )
         }
         setContentView(root)
@@ -238,14 +166,12 @@ class MainActivity : AppCompatActivity() {
             insets
         }
         ViewCompat.requestApplyInsets(root)
-
+        toolDock.doOnLayout { inputSurface.post(::configureRawDrawing) }
         inputSurface.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) = Unit
-
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
                 inputSurface.post(::configureRawDrawing)
             }
-
             override fun surfaceDestroyed(holder: SurfaceHolder) {
                 disableRawDrawing()
             }
@@ -254,36 +180,29 @@ class MainActivity : AppCompatActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) {
-            hideSystemBars()
-            inputSurface.post(::configureRawDrawing)
-        }
+        if (hasFocus) inputSurface.post(::configureRawDrawing)
     }
 
     override fun onResume() {
         super.onResume()
         resumed = true
-        hideSystemBars()
         inputSurface.post(::configureRawDrawing)
     }
 
     override fun onPause() {
         resumed = false
-        persistDocumentNow()
         mainHandler.removeCallbacks(unfreeze)
         disableRawDrawing()
         super.onPause()
     }
 
     override fun onDestroy() {
-        persistDocumentNow()
         mainHandler.removeCallbacksAndMessages(null)
         runCatching {
             helper?.setRawDrawingEnabled(false)
             helper?.closeRawDrawing()
         }
         helper = null
-        persistenceExecutor.shutdown()
         super.onDestroy()
     }
 
@@ -292,72 +211,51 @@ class MainActivity : AppCompatActivity() {
         runCatching { RxManager.Builder.initAppContext(applicationContext) }
         runCatching { EpdController.enablePost(1) }
         runCatching { EpdController.getMaxTouchPressure() }
-            .getOrNull()
-            ?.takeIf { it > 0f }
-            ?.let { maxTouchPressure = it }
-    }
-
-    private fun hideSystemBars() {
-        WindowInsetsControllerCompat(window, window.decorView).apply {
-            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            hide(WindowInsetsCompat.Type.systemBars())
-        }
+            .getOrNull()?.takeIf { it > 0f }?.let { maxTouchPressure = it }
     }
 
     private fun configureRawDrawing() {
         if (!resumed || inputSurface.width == 0 || inputSurface.height == 0) return
         val limit = Rect(0, 0, inputSurface.width, inputSurface.height)
         val excludes = systemBarExcludes(inputSurface.width, inputSurface.height)
-
         runCatching {
             val currentHelper = helper ?: TouchHelper.create(inputSurface, rawCallback).also { helper = it }
             currentHelper.setRawDrawingEnabled(false)
             currentHelper.closeRawDrawing()
-            val isEraser = activeTool == Tool.Eraser
-            currentHelper.setStrokeWidth(if (isEraser) ERASER_WIDTH_PX else livePenWidth())
-            currentHelper.setStrokeColor(Color.BLACK)
-            currentHelper.setLimitRect(mutableListOf(limit)).setExcludeRect(excludes)
-            currentHelper.openRawDrawing()
-            currentHelper.setBrushRawDrawingEnabled(true)
-            currentHelper.setEraserRawDrawingEnabled(isEraser, StrokeStyle.SOFT_ERASER)
-            currentHelper.setStrokeStyle(
-                if (isEraser) StrokeStyle.SOFT_ERASER else TouchHelper.STROKE_STYLE_FOUNTAIN,
-            )
-            if (isEraser) {
-                // Fountain consumes its width before the style is selected. SOFT_ERASER instead
-                // needs it reapplied afterwards along with its style-specific parameters.
+            if (activeTool == Tool.Pen) {
+                // Keep the known-good pen pipeline exactly as the pen baseline.
+                currentHelper.setStrokeWidth(livePenWidth())
+                currentHelper.setLimitRect(mutableListOf(limit)).setExcludeRect(excludes)
+                currentHelper.openRawDrawing()
+                currentHelper.setBrushRawDrawingEnabled(true)
+                currentHelper
+                    .setStrokeStyle(TouchHelper.STROKE_STYLE_FOUNTAIN)
+                    .setStrokeColor(Color.BLACK)
+                    .setStrokeWidth(livePenWidth())
+            } else {
                 currentHelper.setStrokeWidth(ERASER_WIDTH_PX)
-                // SOFT_ERASER has its own native parameters. Without them the firmware falls back
-                // to a device default that can disagree sharply with setStrokeWidth().
+                currentHelper.setStrokeColor(Color.BLACK)
+                currentHelper.setLimitRect(mutableListOf(limit)).setExcludeRect(excludes)
+                currentHelper.openRawDrawing()
+                currentHelper.setBrushRawDrawingEnabled(true)
+                currentHelper.setEraserRawDrawingEnabled(true, StrokeStyle.SOFT_ERASER)
+                currentHelper.setStrokeStyle(StrokeStyle.SOFT_ERASER)
+                currentHelper.setStrokeWidth(ERASER_WIDTH_PX)
                 Device.currentDevice().setStrokeParameters(
                     StrokeStyle.SOFT_ERASER,
                     floatArrayOf(ERASER_WIDTH_PX, SOFT_ERASER_OPACITY, SOFT_ERASER_BLACK_OPACITY),
                 )
-            } else {
-                // ForestNote feeds BOOX a representative point on the same pressure curve used
-                // by its committed renderer. The firmware then supplies its native live dynamics.
-                currentHelper.setStrokeWidth(livePenWidth())
             }
-            // Critical: leave finger input to Android. Only the stylus belongs to the BOOX pipeline.
             currentHelper.enableFingerTouch(false)
             currentHelper.setRawDrawingRenderEnabled(true)
-            // setStroke* and openRawDrawing can silently reactivate raw ink. Re-assert the active
-            // tool at the very end so the selected raw pen or eraser configuration owns the gesture.
-            applyFirmwareState(currentHelper)
+            currentHelper.setRawDrawingEnabled(true)
             EpdController.setViewDefaultUpdateMode(inputSurface, UpdateMode.HAND_WRITING_REPAINT_MODE)
             EpdController.setViewDefaultUpdateMode(sketchView, UpdateMode.HAND_WRITING_REPAINT_MODE)
             attached = true
-        }.onFailure {
-            // The app remains a normal bitmap sketcher if the BOOX SDK is unavailable.
-            attached = false
-        }
+        }.onFailure { attached = false }
     }
 
-    private fun disableRawDrawing() {
-        runCatching {
-            helper?.let(::disableFirmware)
-        }
-    }
+    private fun disableRawDrawing() = runCatching { helper?.let(::disableFirmware) }
 
     private fun systemBarExcludes(width: Int, height: Int): MutableList<Rect> {
         val bars = systemInsets.getInsets(WindowInsetsCompat.Type.systemBars())
@@ -366,82 +264,20 @@ class MainActivity : AppCompatActivity() {
             if (bars.bottom > 0) add(Rect(0, height - bars.bottom, width, height))
             if (bars.left > 0) add(Rect(0, 0, bars.left, height))
             if (bars.right > 0) add(Rect(width - bars.right, 0, width, height))
-            listOf(toolRail, clearButton).filter { it.isLaidOut }.forEach { control ->
+            if (toolDock.isLaidOut) {
                 val location = IntArray(2)
-                control.getLocationInWindow(location)
-                add(
-                    Rect(
-                        location[0],
-                        location[1],
-                        location[0] + control.width,
-                        location[1] + control.height,
-                    ),
-                )
+                toolDock.getLocationInWindow(location)
+                add(Rect(location[0], location[1], location[0] + toolDock.width, location[1] + toolDock.height))
             }
-            // BOOX ignores an empty exclusion list and can retain stale rectangles from a prior session.
             if (isEmpty()) add(Rect(0, 0, 1, 1))
         }
     }
 
     private fun addPoint(point: TouchPoint) {
-        pendingStroke += sketchView.documentPoint(
-            point.getX(),
-            point.getY(),
-            point.getPressure() / maxTouchPressure,
+        pendingStroke += Sample(
+            point.getX(), point.getY(),
+            (point.getPressure() / maxTouchPressure).coerceIn(0f, 1f),
         )
-    }
-
-    private fun livePenWidth(): Float =
-        MIN_STROKE_WIDTH_PX + STROKE_WIDTH_RANGE_PX *
-            (ln(3f * LIVE_PEN_REFERENCE_PRESSURE + 1f) / LN_4)
-
-    private fun selectTool(tool: Tool) {
-        if (activeTool == tool) return
-        activeTool = tool
-        mainHandler.removeCallbacks(unfreeze)
-        helper?.let(::applyFirmwareState)
-        // A raw drawing session latches exclusion rectangles. Reconfigure after a UI/tool change,
-        // but never in the middle of a firmware stroke.
-        if (!strokeInProgress) inputSurface.post(::configureRawDrawing)
-    }
-
-    private fun clearSketch() {
-        mainHandler.removeCallbacks(unfreeze)
-        helper?.let(::disableFirmware)
-        sketchView.clear()
-        inputSurface.post(::configureRawDrawing)
-    }
-
-    private fun scheduleDocumentSave() {
-        mainHandler.removeCallbacks(saveDocument)
-        mainHandler.postDelayed(saveDocument, SAVE_DEBOUNCE_MS)
-    }
-
-    private fun persistDocumentNow() {
-        if (!::sketchView.isInitialized) return
-        mainHandler.removeCallbacks(saveDocument)
-        val document = sketchView.snapshot()
-        runCatching {
-            persistenceExecutor.submit { SketchStore.write(documentFile, document) }.get()
-        }
-    }
-
-    private fun confirmNewSketch() {
-        AlertDialog.Builder(this)
-            .setTitle("New sketch?")
-            .setMessage("This starts a new blank sketch.")
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("New sketch") { _, _ -> clearSketch() }
-            .show()
-    }
-
-    private fun applyFirmwareState(currentHelper: TouchHelper) {
-        if (resumed) {
-            currentHelper.setRawDrawingRenderEnabled(true)
-            currentHelper.setRawDrawingEnabled(true)
-        } else {
-            disableFirmware(currentHelper)
-        }
     }
 
     private fun disableFirmware(currentHelper: TouchHelper) {
@@ -449,49 +285,42 @@ class MainActivity : AppCompatActivity() {
         currentHelper.setRawDrawingEnabled(false)
     }
 
+    private fun livePenWidth(): Float = pressureWidth(LIVE_PEN_REFERENCE_PRESSURE)
+
+    private fun selectTool(tool: Tool) {
+        if (activeTool == tool) return
+        activeTool = tool
+        if (!strokeInProgress) {
+            runCatching {
+                helper?.let(::disableFirmware)
+                helper?.closeRawDrawing()
+            }
+            // A fresh helper ensures the Fountain pen never inherits native eraser state.
+            helper = null
+            inputSurface.post(::configureRawDrawing)
+        }
+    }
+
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     @Composable
-    private fun ToolRail(
-        activeTool: Tool,
-        onToolSelected: (Tool) -> Unit,
-    ) {
-        Column(
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            ToolIconButton(
-                icon = Icons.PenLine,
-                contentDescription = "Pen",
-                selected = activeTool == Tool.Pen,
-            ) { onToolSelected(Tool.Pen) }
-            ToolIconButton(
-                icon = Icons.Eraser,
-                contentDescription = "Eraser",
-                selected = activeTool == Tool.Eraser,
-            ) { onToolSelected(Tool.Eraser) }
+    private fun ToolDock(activeTool: Tool, onToolSelected: (Tool) -> Unit) {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            ToolButton(Icons.PenLine, "Pen", activeTool == Tool.Pen) { onToolSelected(Tool.Pen) }
+            ToolButton(Icons.Eraser, "Eraser", activeTool == Tool.Eraser) { onToolSelected(Tool.Eraser) }
         }
     }
 
     @Composable
-    private fun NewSketchButton(onNewSketch: () -> Unit) {
-        ToolIconButton(
-            icon = Icons.FilePlus,
-            contentDescription = "New sketch",
-            selected = false,
-            onClick = onNewSketch,
-        )
-    }
-
-    @Composable
-    private fun ToolIconButton(
+    private fun ToolButton(
         icon: ImageVector,
         contentDescription: String,
         selected: Boolean,
         onClick: () -> Unit,
     ) {
         val shape = RoundedCornerShape(14.dp)
-        val interactionSource = remember { MutableInteractionSource() }
-        val pressed by interactionSource.collectIsPressedAsState()
+        val interactions = remember { MutableInteractionSource() }
+        val pressed by interactions.collectIsPressedAsState()
         val scale by animateFloatAsState(
             targetValue = if (pressed) 0.9f else 1f,
             animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
@@ -500,14 +329,11 @@ class MainActivity : AppCompatActivity() {
         UnstyledButton(
             onClick = onClick,
             contentPadding = PaddingValues(14.dp),
-            interactionSource = interactionSource,
+            interactionSource = interactions,
             indication = LocalIndication.current,
             modifier = Modifier
                 .size(64.dp)
-                .graphicsLayer {
-                    scaleX = scale
-                    scaleY = scale
-                }
+                .graphicsLayer { scaleX = scale; scaleY = scale }
                 .clip(shape)
                 .background(if (selected) ComposeColor.Black else ComposeColor.White)
                 .border(1.dp, ComposeColor.Black, shape),
@@ -515,69 +341,22 @@ class MainActivity : AppCompatActivity() {
             Image(
                 painter = rememberVectorPainter(icon),
                 contentDescription = contentDescription,
-                colorFilter = ColorFilter.tint(
-                    if (selected) ComposeColor.White else ComposeColor.Black,
-                ),
+                colorFilter = ColorFilter.tint(if (selected) ComposeColor.White else ComposeColor.Black),
                 modifier = Modifier.size(32.dp),
             )
         }
     }
 
-    private data class Sample(
-        val x: Float,
-        val y: Float,
-        val pressure: Float = DEFAULT_PRESSURE,
-    )
+    private data class Sample(val x: Float, val y: Float, val pressure: Float)
 
-    private data class Stroke(
-        val samples: List<Sample>,
-        val isEraser: Boolean,
-        val eraserWidth: Float = ERASER_WIDTH_PX,
-    )
+    private enum class Tool { Pen, Eraser }
 
-    private data class SketchDocument(
-        val viewportOffsetX: Float,
-        val viewportOffsetY: Float,
-        val viewportScale: Float,
-        val strokes: List<Stroke>,
-    )
-
-    private sealed interface Tool {
-        data object Pen : Tool
-        data object Eraser : Tool
-    }
-
-    private class SketchView(
-        context: android.content.Context,
-        private val onDocumentChanged: () -> Unit,
-    ) : View(context) {
-        @Volatile private var viewportOffsetX = 0f
-        @Volatile private var viewportOffsetY = 0f
-        @Volatile private var viewportScale = 1f
-        private val strokes = mutableListOf<Stroke>()
-        private var documentBitmap: Bitmap? = null
-        private var documentCanvas: Canvas? = null
-        private var documentVersion = 0
-        private var renderedDocumentVersion = -1
-        private var renderedOffsetX = Float.NaN
-        private var renderedOffsetY = Float.NaN
-        private var renderedScale = Float.NaN
-        private var panning = false
-        private var trackingFingerGesture = false
-        private var gestureStartDistance = 0f
-        private var gestureStartScale = 1f
-        private var gestureStartFocusX = 0f
-        private var gestureStartFocusY = 0f
-        private var gestureFocusDocumentX = 0f
-        private var gestureFocusDocumentY = 0f
-        private var twoFingerTapCandidate = false
-        private var lastTwoFingerTapAt = 0L
-        private var lastTwoFingerTapX = 0f
-        private var lastTwoFingerTapY = 0f
-        private val touchSlop = android.view.ViewConfiguration.get(context).scaledTouchSlop
+    private class SketchView(context: android.content.Context) : View(context) {
+        private var bitmap: Bitmap? = null
+        private var bitmapCanvas: Canvas? = null
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.BLACK
-            strokeWidth = STROKE_WIDTH_PX
+            strokeWidth = MAX_STROKE_WIDTH_PX
             strokeCap = Paint.Cap.ROUND
             strokeJoin = Paint.Join.ROUND
             style = Paint.Style.STROKE
@@ -589,316 +368,64 @@ class MainActivity : AppCompatActivity() {
             strokeJoin = Paint.Join.ROUND
             style = Paint.Style.STROKE
         }
-        fun documentPoint(screenX: Float, screenY: Float, pressure: Float = DEFAULT_PRESSURE): Sample =
-            Sample(
-                (screenX - viewportOffsetX) / viewportScale,
-                (screenY - viewportOffsetY) / viewportScale,
-                pressure.coerceIn(0f, 1f),
-            )
-
-        fun commit(samples: List<Sample>) {
-            if (samples.isEmpty()) return
-            strokes += Stroke(samples, isEraser = false)
-            invalidateDocument()
-            onDocumentChanged()
-        }
-
-        fun commitEraser(samples: List<Sample>) {
-            if (samples.isEmpty()) return
-            // Firmware widths are screen pixels; persisted samples are document coordinates.
-            // Save the inverse-scaled width so the final erase exactly retains its live footprint.
-            strokes += Stroke(
-                samples = samples,
-                isEraser = true,
-                eraserWidth = ERASER_WIDTH_PX / viewportScale,
-            )
-            invalidateDocument()
-            onDocumentChanged()
-        }
-
-        fun clear() {
-            strokes.clear()
-            invalidateDocument()
-            onDocumentChanged()
-        }
-
-        fun restore(document: SketchDocument) {
-            viewportOffsetX = document.viewportOffsetX
-            viewportOffsetY = document.viewportOffsetY
-            viewportScale = document.viewportScale.coerceIn(MIN_ZOOM, MAX_ZOOM)
-            strokes.clear()
-            strokes += document.strokes
-            invalidateDocument()
-        }
-
-        fun snapshot(): SketchDocument = SketchDocument(
-            viewportOffsetX = viewportOffsetX,
-            viewportOffsetY = viewportOffsetY,
-            viewportScale = viewportScale,
-            strokes = strokes.toList(),
-        )
-
-        override fun onTouchEvent(event: android.view.MotionEvent): Boolean {
-            return handleFingerPan(event)
-        }
 
         override fun onSizeChanged(width: Int, height: Int, oldWidth: Int, oldHeight: Int) {
-            super.onSizeChanged(width, height, oldWidth, oldHeight)
-            documentBitmap?.recycle()
-            documentBitmap = if (width > 0 && height > 0) {
-                Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            } else {
-                null
+            if (width <= 0 || height <= 0) return
+            val replacement = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            bitmap?.let { old -> Canvas(replacement).drawBitmap(old, 0f, 0f, null); old.recycle() }
+            bitmap = replacement
+            bitmapCanvas = Canvas(replacement)
+        }
+
+        fun commit(samples: List<Sample>) {
+            val canvas = bitmapCanvas ?: return
+            when (samples.size) {
+                0 -> return
+                1 -> {
+                    val sample = samples.first()
+                    paint.strokeWidth = pressureWidth(sample.pressure)
+                    canvas.drawPoint(sample.x, sample.y, paint)
+                }
+                else -> samples.zipWithNext().forEach { (from, to) ->
+                    paint.strokeWidth = pressureWidth((from.pressure + to.pressure) / 2f)
+                    canvas.drawLine(from.x, from.y, to.x, to.y, paint)
+                }
             }
-            documentCanvas = documentBitmap?.let(::Canvas)
-            renderedDocumentVersion = -1
+            invalidate()
+        }
+
+        fun erase(samples: List<Sample>) {
+            val canvas = bitmapCanvas ?: return
+            when (samples.size) {
+                0 -> return
+                1 -> canvas.drawPoint(samples.first().x, samples.first().y, eraserPaint)
+                else -> samples.zipWithNext().forEach { (from, to) ->
+                    canvas.drawLine(from.x, from.y, to.x, to.y, eraserPaint)
+                }
+            }
+            invalidate()
         }
 
         override fun onDraw(canvas: Canvas) {
-            rebuildDocumentBitmapIfNeeded()
-            documentBitmap?.let { canvas.drawBitmap(it, 0f, 0f, null) } ?: canvas.drawColor(Color.WHITE)
-        }
-
-        private fun invalidateDocument() {
-            documentVersion += 1
-            invalidate()
-        }
-
-        private fun rebuildDocumentBitmapIfNeeded() {
-            val target = documentBitmap ?: return
-            val targetCanvas = documentCanvas ?: return
-            if (
-                renderedDocumentVersion == documentVersion &&
-                renderedOffsetX == viewportOffsetX &&
-                renderedOffsetY == viewportOffsetY &&
-                renderedScale == viewportScale
-            ) return
-            targetCanvas.drawColor(Color.WHITE)
-            targetCanvas.save()
-            targetCanvas.translate(viewportOffsetX, viewportOffsetY)
-            targetCanvas.scale(viewportScale, viewportScale)
-            strokes.forEach { drawStroke(targetCanvas, it) }
-            targetCanvas.restore()
-            renderedDocumentVersion = documentVersion
-            renderedOffsetX = viewportOffsetX
-            renderedOffsetY = viewportOffsetY
-            renderedScale = viewportScale
-        }
-
-        private fun handleFingerPan(event: android.view.MotionEvent): Boolean {
-            when (event.actionMasked) {
-                android.view.MotionEvent.ACTION_DOWN -> {
-                    trackingFingerGesture = event.getToolType(0) == android.view.MotionEvent.TOOL_TYPE_FINGER
-                    return trackingFingerGesture
-                }
-                android.view.MotionEvent.ACTION_POINTER_DOWN -> {
-                    if (event.pointerCount == 2 && bothPointersAreFingers(event)) {
-                        panning = true
-                        trackingFingerGesture = true
-                        setGestureAnchor(event)
-                        twoFingerTapCandidate = true
-                    } else {
-                        twoFingerTapCandidate = false
-                    }
-                    return trackingFingerGesture
-                }
-                android.view.MotionEvent.ACTION_MOVE -> {
-                    if (panning && event.pointerCount >= 2) {
-                        val focusX = (event.getX(0) + event.getX(1)) / 2f
-                        val focusY = (event.getY(0) + event.getY(1)) / 2f
-                        if (twoFingerTapCandidate && gestureMoved(event, focusX, focusY)) {
-                            twoFingerTapCandidate = false
-                        }
-                        val scaleChange = pointerDistance(event) / gestureStartDistance
-                        viewportScale = (gestureStartScale * scaleChange).coerceIn(MIN_ZOOM, MAX_ZOOM)
-                        viewportOffsetX = focusX - gestureFocusDocumentX * viewportScale
-                        viewportOffsetY = focusY - gestureFocusDocumentY * viewportScale
-                        invalidate()
-                        onDocumentChanged()
-                    }
-                    return trackingFingerGesture
-                }
-                android.view.MotionEvent.ACTION_POINTER_UP -> {
-                    if (panning && event.pointerCount == 2) {
-                        if (twoFingerTapCandidate) registerTwoFingerTap(event)
-                        twoFingerTapCandidate = false
-                        panning = false
-                    }
-                    return trackingFingerGesture
-                }
-                android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
-                    val handled = trackingFingerGesture
-                    panning = false
-                    trackingFingerGesture = false
-                    twoFingerTapCandidate = false
-                    return handled
-                }
-            }
-            return trackingFingerGesture
-        }
-
-        private fun bothPointersAreFingers(event: android.view.MotionEvent): Boolean =
-            event.getToolType(0) == android.view.MotionEvent.TOOL_TYPE_FINGER &&
-                event.getToolType(1) == android.view.MotionEvent.TOOL_TYPE_FINGER
-
-        private fun setGestureAnchor(event: android.view.MotionEvent) {
-            val focusX = (event.getX(0) + event.getX(1)) / 2f
-            val focusY = (event.getY(0) + event.getY(1)) / 2f
-            gestureStartFocusX = focusX
-            gestureStartFocusY = focusY
-            gestureStartDistance = pointerDistance(event).coerceAtLeast(1f)
-            gestureStartScale = viewportScale
-            gestureFocusDocumentX = (focusX - viewportOffsetX) / viewportScale
-            gestureFocusDocumentY = (focusY - viewportOffsetY) / viewportScale
-        }
-
-        private fun gestureMoved(event: android.view.MotionEvent, focusX: Float, focusY: Float): Boolean {
-            val focusDistance = kotlin.math.hypot(
-                focusX - gestureStartFocusX,
-                focusY - gestureStartFocusY,
-            )
-            return focusDistance > touchSlop ||
-                kotlin.math.abs(pointerDistance(event) - gestureStartDistance) > touchSlop
-        }
-
-        private fun registerTwoFingerTap(event: android.view.MotionEvent) {
-            val focusX = (event.getX(0) + event.getX(1)) / 2f
-            val focusY = (event.getY(0) + event.getY(1)) / 2f
-            val isDoubleTap = event.eventTime - lastTwoFingerTapAt <=
-                android.view.ViewConfiguration.getDoubleTapTimeout() &&
-                kotlin.math.hypot(focusX - lastTwoFingerTapX, focusY - lastTwoFingerTapY) <= touchSlop * 2
-            if (isDoubleTap) {
-                resetZoomAt(focusX, focusY)
-                lastTwoFingerTapAt = 0L
-            } else {
-                lastTwoFingerTapAt = event.eventTime
-                lastTwoFingerTapX = focusX
-                lastTwoFingerTapY = focusY
-            }
-        }
-
-        private fun resetZoomAt(focusX: Float, focusY: Float) {
-            val documentX = (focusX - viewportOffsetX) / viewportScale
-            val documentY = (focusY - viewportOffsetY) / viewportScale
-            viewportScale = 1f
-            viewportOffsetX = focusX - documentX
-            viewportOffsetY = focusY - documentY
-            invalidate()
-            onDocumentChanged()
-        }
-
-        private fun pointerDistance(event: android.view.MotionEvent): Float {
-            val x = event.getX(1) - event.getX(0)
-            val y = event.getY(1) - event.getY(0)
-            return kotlin.math.sqrt(x * x + y * y)
-        }
-
-        private fun drawStroke(canvas: Canvas, stroke: Stroke) {
-            when (stroke.samples.size) {
-                0 -> Unit
-                1 -> {
-                    val sample = stroke.samples.first()
-                    canvas.drawPoint(sample.x, sample.y, paintFor(stroke, sample.pressure))
-                }
-                else -> stroke.samples.zipWithNext().forEach { (from, to) ->
-                    canvas.drawLine(
-                        from.x,
-                        from.y,
-                        to.x,
-                        to.y,
-                        paintFor(stroke, (from.pressure + to.pressure) / 2f),
-                    )
-                }
-            }
-        }
-
-        private fun paintFor(stroke: Stroke, pressure: Float): Paint =
-            if (stroke.isEraser) {
-                eraserPaint.apply { strokeWidth = stroke.eraserWidth }
-            } else {
-                paint.apply { strokeWidth = pressureWidth(pressure) }
-            }
-
-        private fun pressureWidth(pressure: Float): Float =
-            MIN_STROKE_WIDTH_PX + STROKE_WIDTH_RANGE_PX *
-                (ln(3f * pressure.coerceIn(0f, 1f) + 1f) / LN_4)
-    }
-
-    private object SketchStore {
-        private const val MAGIC = 0x534B4554 // SKET
-        private const val VERSION = 4
-        private const val MAX_STROKES = 100_000
-        private const val MAX_SAMPLES_PER_STROKE = 100_000
-
-        fun read(file: File): SketchDocument? = runCatching {
-            DataInputStream(BufferedInputStream(FileInputStream(file))).use { input ->
-                check(input.readInt() == MAGIC)
-                val version = input.readInt()
-                check(version in 1..VERSION)
-                val offsetX = input.readFloat()
-                val offsetY = input.readFloat()
-                val scale = if (version >= 2) input.readFloat() else 1f
-                val strokeCount = input.readInt()
-                check(strokeCount in 0..MAX_STROKES)
-                val strokes = ArrayList<Stroke>(strokeCount)
-                repeat(strokeCount) {
-                    val isEraser = input.readBoolean()
-                    val sampleCount = input.readInt()
-                    check(sampleCount in 0..MAX_SAMPLES_PER_STROKE)
-                    val samples = ArrayList<Sample>(sampleCount)
-                    repeat(sampleCount) {
-                        val x = input.readFloat()
-                        val y = input.readFloat()
-                        val pressure = if (version >= 3) input.readFloat() else DEFAULT_PRESSURE
-                        samples += Sample(x, y, pressure)
-                    }
-                    val eraserWidth = if (version >= 4) input.readFloat() else ERASER_WIDTH_PX
-                    strokes += Stroke(samples, isEraser, eraserWidth)
-                }
-                SketchDocument(offsetX, offsetY, scale, strokes)
-            }
-        }.getOrNull()
-
-        fun write(file: File, document: SketchDocument) {
-            val temporary = File(file.parentFile, "${file.name}.tmp")
-            DataOutputStream(BufferedOutputStream(FileOutputStream(temporary))).use { output ->
-                output.writeInt(MAGIC)
-                output.writeInt(VERSION)
-                output.writeFloat(document.viewportOffsetX)
-                output.writeFloat(document.viewportOffsetY)
-                output.writeFloat(document.viewportScale)
-                output.writeInt(document.strokes.size)
-                document.strokes.forEach { stroke ->
-                    output.writeBoolean(stroke.isEraser)
-                    output.writeInt(stroke.samples.size)
-                    stroke.samples.forEach { sample ->
-                        output.writeFloat(sample.x)
-                        output.writeFloat(sample.y)
-                        output.writeFloat(sample.pressure)
-                    }
-                    output.writeFloat(stroke.eraserWidth)
-                }
-            }
-            check(temporary.renameTo(file)) { "Could not replace ${file.name}" }
+            canvas.drawColor(Color.WHITE)
+            bitmap?.let { canvas.drawBitmap(it, 0f, 0f, null) }
         }
     }
 
     private companion object {
-        const val STROKE_WIDTH_PX = 5f
         const val MIN_STROKE_WIDTH_PX = 2f
-        const val STROKE_WIDTH_RANGE_PX = 3f
+        const val MAX_STROKE_WIDTH_PX = 5f
         const val LIVE_PEN_REFERENCE_PRESSURE = 0.25f
         const val DEFAULT_MAX_TOUCH_PRESSURE = 4095f
         const val LN_4 = 1.3862944f
+        const val UNFREEZE_IDLE_MS = 700L
+        const val PANEL_SETTLE_MS = 300L
         const val ERASER_WIDTH_PX = 42f
         const val SOFT_ERASER_OPACITY = 0.5f
         const val SOFT_ERASER_BLACK_OPACITY = 0.1f
-        const val UNFREEZE_IDLE_MS = 700L
-        const val PANEL_SETTLE_MS = 300L
-        const val SAVE_DEBOUNCE_MS = 250L
-        const val DOCUMENT_FILE_NAME = "sketchbook-document.bin"
-        const val MIN_ZOOM = 0.25f
-        const val MAX_ZOOM = 4f
-        const val DEFAULT_PRESSURE = 0.5f
+
+        fun pressureWidth(pressure: Float): Float =
+            MIN_STROKE_WIDTH_PX + (MAX_STROKE_WIDTH_PX - MIN_STROKE_WIDTH_PX) *
+                (ln(3f * pressure.coerceIn(0f, 1f) + 1f) / LN_4)
     }
 }
