@@ -57,6 +57,7 @@ import com.onyx.android.sdk.data.note.TouchPoint
 import com.onyx.android.sdk.pen.RawInputCallback
 import com.onyx.android.sdk.pen.TouchHelper
 import com.onyx.android.sdk.pen.data.TouchPointList
+import com.onyx.android.sdk.pen.style.StrokeStyle
 import com.onyx.android.sdk.rx.RxManager
 import org.lsposed.hiddenapibypass.HiddenApiBypass
 import java.io.BufferedInputStream
@@ -89,6 +90,7 @@ class MainActivity : AppCompatActivity() {
     private var resumed = false
     private var strokeInProgress = false
     private var activeTool by mutableStateOf<Tool>(Tool.Pen)
+    private var strokeTool: Tool = Tool.Pen
     private val pendingStroke = ArrayList<Sample>(512)
     private val documentFile by lazy { File(filesDir, DOCUMENT_FILE_NAME) }
     private val saveDocument = Runnable {
@@ -114,10 +116,7 @@ class MainActivity : AppCompatActivity() {
 
     private val rawCallback = object : RawInputCallback() {
         override fun onBeginRawDrawing(isEraser: Boolean, point: TouchPoint?) {
-            strokeInProgress = true
-            mainHandler.removeCallbacks(unfreeze)
-            pendingStroke.clear()
-            point?.let(::addPoint)
+            beginRawStroke(activeTool, point)
         }
 
         override fun onRawDrawingTouchPointMoveReceived(point: TouchPoint?) {
@@ -127,23 +126,44 @@ class MainActivity : AppCompatActivity() {
         override fun onRawDrawingTouchPointListReceived(points: TouchPointList?) = Unit
 
         override fun onEndRawDrawing(isEraser: Boolean, point: TouchPoint?) {
-            point?.let(::addPoint)
-            val stroke = pendingStroke.toList()
-            pendingStroke.clear()
-            strokeInProgress = false
-            sketchView.post {
-                sketchView.commit(stroke)
-                // Do not toggle firmware capture on every pen-up: it can erase the preview mid-write.
-                // Wait until the writer pauses, then briefly release only the render passthrough.
-                mainHandler.removeCallbacks(unfreeze)
-                mainHandler.postDelayed(unfreeze, UNFREEZE_IDLE_MS)
-            }
+            endRawStroke(point)
         }
 
-        override fun onBeginRawErasing(isEraser: Boolean, point: TouchPoint?) = Unit
-        override fun onRawErasingTouchPointMoveReceived(point: TouchPoint?) = Unit
+        override fun onBeginRawErasing(isEraser: Boolean, point: TouchPoint?) {
+            beginRawStroke(Tool.Eraser, point)
+        }
+
+        override fun onRawErasingTouchPointMoveReceived(point: TouchPoint?) {
+            point?.let(::addPoint)
+        }
+
         override fun onRawErasingTouchPointListReceived(points: TouchPointList?) = Unit
-        override fun onEndRawErasing(isEraser: Boolean, point: TouchPoint?) = Unit
+        override fun onEndRawErasing(isEraser: Boolean, point: TouchPoint?) {
+            endRawStroke(point)
+        }
+    }
+
+    private fun beginRawStroke(tool: Tool, point: TouchPoint?) {
+        strokeInProgress = true
+        strokeTool = tool
+        mainHandler.removeCallbacks(unfreeze)
+        pendingStroke.clear()
+        point?.let(::addPoint)
+    }
+
+    private fun endRawStroke(point: TouchPoint?) {
+        point?.let(::addPoint)
+        val stroke = pendingStroke.toList()
+        val tool = strokeTool
+        pendingStroke.clear()
+        strokeInProgress = false
+        sketchView.post {
+            if (tool == Tool.Eraser) sketchView.commitEraser(stroke) else sketchView.commit(stroke)
+            // Do not toggle firmware capture on every pen-up: it can erase the preview mid-write.
+            // Wait until the writer pauses, then briefly release only the render passthrough.
+            mainHandler.removeCallbacks(unfreeze)
+            mainHandler.postDelayed(unfreeze, UNFREEZE_IDLE_MS)
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -285,16 +305,21 @@ class MainActivity : AppCompatActivity() {
             val currentHelper = helper ?: TouchHelper.create(inputSurface, rawCallback).also { helper = it }
             currentHelper.setRawDrawingEnabled(false)
             currentHelper.closeRawDrawing()
-            currentHelper.setStrokeWidth(STROKE_WIDTH_PX)
+            val isEraser = activeTool == Tool.Eraser
+            currentHelper.setStrokeWidth(if (isEraser) ERASER_WIDTH_PX else STROKE_WIDTH_PX)
             currentHelper.setStrokeColor(Color.BLACK)
             currentHelper.setLimitRect(mutableListOf(limit)).setExcludeRect(excludes)
             currentHelper.openRawDrawing()
-            currentHelper.setStrokeStyle(TouchHelper.STROKE_STYLE_FOUNTAIN)
+            currentHelper.setBrushRawDrawingEnabled(true)
+            currentHelper.setEraserRawDrawingEnabled(isEraser, StrokeStyle.SOFT_ERASER)
+            currentHelper.setStrokeStyle(
+                if (isEraser) StrokeStyle.SOFT_ERASER else TouchHelper.STROKE_STYLE_FOUNTAIN,
+            )
             // Critical: leave finger input to Android. Only the stylus belongs to the BOOX pipeline.
             currentHelper.enableFingerTouch(false)
             currentHelper.setRawDrawingRenderEnabled(true)
             // setStroke* and openRawDrawing can silently reactivate raw ink. Re-assert the active
-            // tool at the very end, so a non-pen tool never draws underneath its UI.
+            // tool at the very end so the selected raw pen or eraser configuration owns the gesture.
             applyFirmwareState(currentHelper)
             EpdController.setViewDefaultUpdateMode(inputSurface, UpdateMode.HAND_WRITING_REPAINT_MODE)
             EpdController.setViewDefaultUpdateMode(sketchView, UpdateMode.HAND_WRITING_REPAINT_MODE)
@@ -343,7 +368,6 @@ class MainActivity : AppCompatActivity() {
         if (activeTool == tool) return
         activeTool = tool
         mainHandler.removeCallbacks(unfreeze)
-        sketchView.eraserEnabled = tool == Tool.Eraser
         helper?.let(::applyFirmwareState)
         // A raw drawing session latches exclusion rectangles. Reconfigure after a UI/tool change,
         // but never in the middle of a firmware stroke.
@@ -381,7 +405,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun applyFirmwareState(currentHelper: TouchHelper) {
-        if (activeTool == Tool.Pen && resumed) {
+        if (resumed) {
             currentHelper.setRawDrawingRenderEnabled(true)
             currentHelper.setRawDrawingEnabled(true)
         } else {
@@ -492,14 +516,10 @@ class MainActivity : AppCompatActivity() {
         context: android.content.Context,
         private val onDocumentChanged: () -> Unit,
     ) : View(context) {
-        var eraserEnabled = false
         @Volatile private var viewportOffsetX = 0f
         @Volatile private var viewportOffsetY = 0f
         @Volatile private var viewportScale = 1f
         private val strokes = mutableListOf<Stroke>()
-        private var activeEraserStroke: MutableList<Sample>? = null
-        private var eraserCursorX: Float? = null
-        private var eraserCursorY: Float? = null
         private var panning = false
         private var trackingFingerGesture = false
         private var gestureStartDistance = 0f
@@ -527,11 +547,6 @@ class MainActivity : AppCompatActivity() {
             strokeJoin = Paint.Join.ROUND
             style = Paint.Style.STROKE
         }
-        private val eraserCursorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.BLACK
-            strokeWidth = 2f
-            style = Paint.Style.STROKE
-        }
         fun documentPoint(screenX: Float, screenY: Float, pressure: Float = DEFAULT_PRESSURE): Sample =
             Sample(
                 (screenX - viewportOffsetX) / viewportScale,
@@ -546,10 +561,15 @@ class MainActivity : AppCompatActivity() {
             onDocumentChanged()
         }
 
+        fun commitEraser(samples: List<Sample>) {
+            if (samples.isEmpty()) return
+            strokes += Stroke(samples, isEraser = true)
+            invalidate()
+            onDocumentChanged()
+        }
+
         fun clear() {
             strokes.clear()
-            activeEraserStroke = null
-            hideEraserCursor()
             invalidate()
             onDocumentChanged()
         }
@@ -567,45 +587,11 @@ class MainActivity : AppCompatActivity() {
             viewportOffsetX = viewportOffsetX,
             viewportOffsetY = viewportOffsetY,
             viewportScale = viewportScale,
-            strokes = strokes + listOfNotNull(
-                activeEraserStroke?.let { Stroke(it.toList(), isEraser = true) },
-            ),
+            strokes = strokes.toList(),
         )
 
         override fun onTouchEvent(event: android.view.MotionEvent): Boolean {
-            if (handleFingerPan(event)) return true
-
-            val isStylus = event.getToolType(0).let {
-                it == android.view.MotionEvent.TOOL_TYPE_STYLUS ||
-                    it == android.view.MotionEvent.TOOL_TYPE_ERASER
-            }
-            if (!eraserEnabled || !isStylus) return false
-            when (event.actionMasked) {
-                android.view.MotionEvent.ACTION_DOWN -> {
-                    activeEraserStroke = mutableListOf(documentPoint(event.x, event.y))
-                    showEraserCursor(event.x, event.y)
-                    invalidate()
-                    return true
-                }
-                android.view.MotionEvent.ACTION_MOVE -> {
-                    activeEraserStroke?.add(documentPoint(event.x, event.y))
-                    showEraserCursor(event.x, event.y)
-                    invalidate()
-                    return true
-                }
-                android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
-                    activeEraserStroke?.apply {
-                        add(documentPoint(event.x, event.y))
-                        strokes += Stroke(toList(), isEraser = true)
-                    }
-                    activeEraserStroke = null
-                    hideEraserCursor()
-                    invalidate()
-                    onDocumentChanged()
-                    return true
-                }
-            }
-            return false
+            return handleFingerPan(event)
         }
 
         override fun onDraw(canvas: Canvas) {
@@ -614,26 +600,7 @@ class MainActivity : AppCompatActivity() {
             canvas.translate(viewportOffsetX, viewportOffsetY)
             canvas.scale(viewportScale, viewportScale)
             strokes.forEach { drawStroke(canvas, it) }
-            activeEraserStroke?.let { drawStroke(canvas, Stroke(it, isEraser = true)) }
             canvas.restore()
-            eraserCursorX?.let { x ->
-                canvas.drawCircle(
-                    x,
-                    requireNotNull(eraserCursorY),
-                    ERASER_WIDTH_PX * viewportScale / 2f,
-                    eraserCursorPaint,
-                )
-            }
-        }
-
-        private fun showEraserCursor(screenX: Float, screenY: Float) {
-            eraserCursorX = screenX
-            eraserCursorY = screenY
-        }
-
-        private fun hideEraserCursor() {
-            eraserCursorX = null
-            eraserCursorY = null
         }
 
         private fun handleFingerPan(event: android.view.MotionEvent): Boolean {
@@ -646,7 +613,6 @@ class MainActivity : AppCompatActivity() {
                     if (event.pointerCount == 2 && bothPointersAreFingers(event)) {
                         panning = true
                         trackingFingerGesture = true
-                        activeEraserStroke = null
                         setGestureAnchor(event)
                         twoFingerTapCandidate = true
                     } else {
